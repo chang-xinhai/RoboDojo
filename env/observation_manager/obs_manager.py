@@ -117,7 +117,16 @@ class ObsManager:
             self._capture_multimodal(obs, env_idx_list)
         elif self.camera_manager is not None and self.capture_manager is not None:
             try:
-                data = self.capture_manager.step(env_ids=env_idx_list)
+                from env.camera_manager.capture.render_sync import wait_for_camera_data
+                from utils.isaaclab_compat import simulation_snapshot
+
+                data, _ = wait_for_camera_data(
+                    self.env,
+                    lambda: self.capture_manager.step(env_ids=env_idx_list),
+                    physics_state=lambda: simulation_snapshot(self.env.sim.sim),
+                    min_passes=self.capture_render_passes,
+                    max_passes=self.capture_render_max_passes,
+                )
                 for ith in range(self.camera_manager.num_cams):
                     cam_data = data[ith]
                     for annotator_name, env_list in cam_data.items():

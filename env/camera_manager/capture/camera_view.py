@@ -308,6 +308,16 @@ class CameraView(XFormPrim):
         else:
             tiled_data: wp.array = data
             info = {}
+        # Never launch the reshape kernel against an empty native startup
+        # buffer: the requested render product may still be compiling shaders.
+        from env.camera_manager.capture.render_sync import CameraFrameNotReady
+
+        expected_size = self.tiled_resolution[0] * self.tiled_resolution[1] * spec["channels"]
+        if tiled_data is None or tiled_data.size != expected_size:
+            actual_size = 0 if tiled_data is None else tiled_data.size
+            raise CameraFrameNotReady(
+                f"{self._render_product_path}/{annotator_type}: delivered {actual_size} values, expected {expected_size}"
+            )
         # tiled image
         if tiled:
             shape = (*self.tiled_resolution, spec["channels"])

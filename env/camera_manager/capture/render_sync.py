@@ -27,7 +27,7 @@ does not advance physics.
 
 from __future__ import annotations
 
-from typing import Optional
+import numpy as np
 
 _DISPATCHER_PATH = "/Render/PostProcess/SDGPipeline/PostProcessDispatcher"
 
@@ -42,6 +42,84 @@ _warned_missing_settings = False
 _reported_active = False
 
 
+class CameraFrameNotReady(RuntimeError):
+    """A render product has not delivered its requested image buffer yet."""
+
+
+def ensure_camera_color_render_enabled(settings=None):
+    """Restore color rendering after Isaac Lab creates headless depth-only cameras.
+
+    Sim 6's IsaacRtxRenderer disables color process-wide for depth-only sensors.
+    TacSL uses these sensors alongside RGB and projected HDR camera products.
+    Restore their required color AOV before each render-only acquisition, so
+    late depth-camera creation cannot leave RGB/HDR permanently black.
+    """
+    if settings is None:
+        import carb.settings
+
+        settings = carb.settings.get_settings()
+    settings.set_bool("/rtx/sdg/force/disableColorRender", False)
+
+
+def pending_camera_payloads(data):
+    """Identify uninitialized requested RGB/depth buffers, without filling them."""
+    pending = []
+    for camera_id, camera in enumerate(data):
+        for annotator, samples in camera.items():
+            if annotator not in {"rgb", "rgba", "depth", "depth_gt", "distance_to_image_plane", "distance_to_camera"}:
+                continue
+            for env_id, sample in enumerate(samples):
+                value = sample.get("data") if isinstance(sample, dict) else sample
+                if hasattr(value, "detach"):
+                    value = value.detach()
+                if hasattr(value, "cpu"):
+                    value = value.cpu()
+                if hasattr(value, "numpy"):
+                    value = value.numpy()
+                image = np.asarray(value) if value is not None else np.array([])
+                label = f"camera[{camera_id}]/env[{env_id}]/{annotator}"
+                if image.size == 0:
+                    pending.append(label + ": empty")
+                elif annotator in {"rgb", "rgba"}:
+                    color = image[..., :3]
+                    if not np.isfinite(color).all() or not np.any(color > 0):
+                        pending.append(label + ": no finite nonzero RGB signal")
+                elif not np.any(np.isfinite(image) & (image > 0)):
+                    pending.append(label + ": no finite positive depth")
+    return pending
+
+
+def wait_for_camera_data(env, read_data, *, physics_state, min_passes=1, max_passes=32):
+    """Bounded render-only wait for actual requested image buffers at one physics state.
+
+    A dispatcher delivery alone does not mean a newly created render product
+    has compiled its shaders and populated every annotator. Return only real
+    buffers; reject physics advancement and name pending channels on timeout.
+    """
+    before = physics_state()
+    ensure_camera_color_render_enabled()
+    passes = wait_for_latest_cameras(env, min_passes=min_passes, max_passes=max_passes)
+    pending = []
+    while True:
+        if physics_state() != before:
+            raise RuntimeError("Physics advanced while waiting for camera buffers")
+        try:
+            data = read_data()
+            pending = pending_camera_payloads(data)
+        except CameraFrameNotReady as exc:
+            pending = [str(exc)]
+        if not pending:
+            if physics_state() != before:
+                raise RuntimeError("Physics advanced while reading camera buffers")
+            return data, passes
+        if passes >= max_passes:
+            raise CameraFrameNotReady(
+                f"Camera buffers not ready after {passes} frozen-physics render passes: " + "; ".join(pending)
+            )
+        env.render()
+        passes += 1
+
+
 def zero_delay_kit_args() -> str:
     """Kit command-line overrides for the zero-delay render settings."""
     return " ".join(f"--{key}={value}" for key, value in ZERO_DELAY_KIT_SETTINGS.items())
@@ -54,11 +132,7 @@ def add_zero_delay_kit_args(args) -> None:
     startup and cannot be changed afterwards.
     """
     current = getattr(args, "kit_args", None) or ""
-    missing = [
-        f"--{key}={value}"
-        for key, value in ZERO_DELAY_KIT_SETTINGS.items()
-        if f"--{key}=" not in current
-    ]
+    missing = [f"--{key}={value}" for key, value in ZERO_DELAY_KIT_SETTINGS.items() if f"--{key}=" not in current]
     if missing:
         args.kit_args = (current + " " + " ".join(missing)).strip()
 
@@ -77,9 +151,7 @@ def zero_delay_active() -> bool:
             return False
     except (TypeError, ValueError):
         return False
-    return _truthy(settings.get("/app/renderer/waitIdle")) and _truthy(
-        settings.get("/app/hydraEngine/waitIdle")
-    )
+    return _truthy(settings.get("/app/renderer/waitIdle")) and _truthy(settings.get("/app/hydraEngine/waitIdle"))
 
 
 def _truthy(value) -> bool:
@@ -89,7 +161,7 @@ def _truthy(value) -> bool:
     return bool(value)
 
 
-def dispatcher_time() -> Optional[float]:
+def dispatcher_time() -> float | None:
     """Reference time of the last frame the SDG pipeline dispatched."""
     try:
         import omni.graph.core as og
@@ -160,4 +232,8 @@ def wait_for_latest_cameras(
         last_stamp = stamp
         if delivered >= required:
             break
+    if delivered < required:
+        raise CameraFrameNotReady(
+            f"Camera dispatcher delivered {delivered}/{required} fresh frames after {passes} render passes"
+        )
     return passes

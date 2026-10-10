@@ -37,6 +37,14 @@ claim. It does not substitute a grayscale RGB image for either stereo view.
 The dot layout and radiance scale should be validated for each task scene.
 Use `render.antialiasing_mode: Off` in the multimodal environment profile:
 temporal AA and DLSS blend the projector phases and suppress the dot pattern.
+Isaac Lab's headless depth-only renderer sets the global
+`/rtx/sdg/force/disableColorRender` flag. TacSL depth cameras trigger this
+optimization even when RGB/HDR products also exist. The shared capture entry
+restores color rendering before every acquisition. It then waits for actual
+requested RGB and finite positive depth buffers within a bounded render count,
+without advancing physics or substituting an image. Missing startup buffers
+are rejected before launching the tiled reshape kernel; timeout errors identify
+the pending camera and channel.
 Exact Isaac Sim `6.1.0.0` plane and rotated-rig validation passed with projector
 intensity 1500 and saturation radiance 5500. All three rigs reconstructed the
 known one-meter plane with median depth 1.0 m and 79.98–80.00% valid pixels.
@@ -69,6 +77,14 @@ raw image/depth NPZ files, and labeled galleries:
 - `reproduction/isaac61/outputs/sl-plane-61/{report.json,structured_light.png}`
 - `reproduction/isaac61/outputs/sl-rotated-61/{report.json,structured_light.png}`
 - `reproduction/isaac61/outputs/sl-tilted-plane-61/{report.json,structured_light.png}`
+
+The complete canonical `stack_bowls` collector also passed on exact Isaac Sim
+6.1 with three mounted RGB/GT-depth/IR-pair/SL-depth rigs and four TacSL finger
+sensors enabled together. The one-frame production integration check reports
+76.09%, 61.24%, and 61.93% valid SL depth for head, left wrist, and right wrist.
+All cameras and tactile samples share physics frame 363 and simulation timestamp
+`1452000000` ns. Its raw recording, numeric validation, and gallery are in
+`reproduction/isaac61/outputs/sl-integration-color-guard-v5/`.
 
 Reproduce the checks using the isolated Kit cache configured by the wrapper:
 

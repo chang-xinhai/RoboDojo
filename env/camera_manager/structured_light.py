@@ -256,7 +256,7 @@ class StructuredLightCapture:
                     image.MakeInvisible()
 
     def _render(self):
-        from env.camera_manager.capture.render_sync import wait_for_latest_cameras, zero_delay_active
+        from env.camera_manager.capture.render_sync import wait_for_camera_data, zero_delay_active
 
         # render_sync expects env.render(); the Isaac simulation context has the
         # same render-only API and does not advance PhysX or the timeline.
@@ -265,27 +265,45 @@ class StructuredLightCapture:
                 "Structured-light phase fencing requires zero-delay Kit settings; "
                 "call add_zero_delay_kit_args before AppLauncher"
             )
-        return wait_for_latest_cameras(
+
+        def read_rgbd():
+            data = []
+            for rigs in self.rigs.values():
+                for rig in rigs.values():
+                    rgb = self._array(rig["rgb"].get_data("rgb"), rig["shape"], 3)
+                    depth = self._array(rig["rgb"].get_data("distance_to_image_plane"), rig["shape"])
+                    data.append({"rgb": [{"data": rgb}], "depth_gt": [{"data": depth}]})
+            return data
+
+        _, passes = wait_for_camera_data(
             self.manager.sim.sim,
+            read_rgbd,
+            physics_state=lambda: physics_timestamp_ns(self.manager.sim.sim),
             min_passes=int(self.config.get("settle_render_passes", 3)),
             max_passes=int(self.config.get("max_render_passes", 32)),
         )
+        return passes
 
     @staticmethod
     def _array(data, shape, channels=None):
+        from env.camera_manager.capture.render_sync import CameraFrameNotReady
+
         if isinstance(data, tuple):
             data = data[0]
         if isinstance(data, dict):
             data = data.get("data")
         if data is None:
-            raise RuntimeError("RTX camera annotator has no delivered frame")
+            raise CameraFrameNotReady("RTX camera annotator has no delivered frame")
         if hasattr(data, "numpy"):
             data = data.numpy()
         value = np.asarray(data)
         if value.ndim == 1:
+            expected = int(np.prod(shape))
+            if value.size < expected or value.size % expected:
+                raise CameraFrameNotReady(f"RTX camera annotator delivered {value.size} values for image {shape}")
             value = value.reshape((*shape, -1) if channels else shape)
         if value.shape[:2] != shape or (channels and (value.ndim != 3 or value.shape[-1] < channels)):
-            raise RuntimeError(f"Unexpected RTX image shape {value.shape}, expected {shape}")
+            raise CameraFrameNotReady(f"Unexpected RTX image shape {value.shape}, expected {shape}")
         return value.copy()
 
     def capture(self, env_id=0):
