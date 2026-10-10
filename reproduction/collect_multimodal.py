@@ -17,6 +17,9 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--task", default="stack_bowls")
 parser.add_argument("--env-cfg", default="arx_x5_multimodal")
+parser.add_argument("--layout-config", default="arx_x5")
+parser.add_argument("--layout-id", type=int, default=0)
+parser.add_argument("--layout-file", type=Path, help="Override the canonical saved eval layout.")
 parser.add_argument("--frames", type=int, default=5)
 parser.add_argument("--warmup-steps", type=int, default=10)
 parser.add_argument("--output", type=Path, default=ROOT / "reproduction" / "isaac61" / "outputs" / "multimodal-capture")
@@ -41,6 +44,9 @@ launcher = AppLauncher(args)
 app = launcher.app
 success = False
 try:
+    from utils.isaaclab_compat import enable_legacy_isaacsim_extensions
+
+    enable_legacy_isaacsim_extensions()
     import numpy as np
     from omegaconf import OmegaConf
 
@@ -48,6 +54,7 @@ try:
     from task.RoboDojo.task_registry import load_task_class
     from utils.load_file import load_yaml
     from utils.multimodal import MultimodalWriter
+    from utils.task_layout import load_task_layout, verify_task_scene
 
     eval_cfg = load_yaml(str(ROOT / "env_cfg" / (args.env_cfg + ".yml")))
     cfg = OmegaConf.create(
@@ -62,9 +69,14 @@ try:
     cfg.sim.device = "cuda:0"
     cfg.sim.seed = [0]
     cfg.camera.default_frequency = eval_cfg["observation"]["collect_freq"]
-    _, task_class = load_task_class(args.task)
+    task_name, task_class = load_task_class(args.task)
+    layout, layout_provenance = load_task_layout(
+        ROOT, task_name, layout_config=args.layout_config, layout_id=args.layout_id, layout_file=args.layout_file
+    )
+    cfg.saved_layouts = [layout]
     env = task_class(cfg, app, seed=0)
     env.reset(seed=0)
+    scene_validation = verify_task_scene(env.scene_manager, layout)
     obs_cfg = eval_cfg["observation"]
     if not obs_cfg.get("multimodal"):
         raise ValueError("Collector requires observation.multimodal=true; use arx_x5_multimodal")
@@ -74,7 +86,14 @@ try:
         env.sim_step(render=False)
     writer = MultimodalWriter(
         args.output,
-        {"task": args.task, "env_cfg": args.env_cfg, "seed": 0, "requested_collect_frequency_hz": obs.collect_freq},
+        {
+            "task": args.task,
+            "env_cfg": args.env_cfg,
+            "seed": 0,
+            "requested_collect_frequency_hz": obs.collect_freq,
+            "layout": layout_provenance,
+            "scene": scene_validation,
+        },
     )
     reports = []
     for index in range(args.frames):
@@ -119,7 +138,17 @@ try:
 
         print(json.dumps(visualize(args.output)), flush=True)
     (args.output / "validation.json").write_text(
-        json.dumps({"status": "passed", "real_runtime": True, "frames": reports}, indent=2) + "\n"
+        json.dumps(
+            {
+                "status": "passed",
+                "real_runtime": True,
+                "frames": reports,
+                "layout": layout_provenance,
+                "scene": scene_validation,
+            },
+            indent=2,
+        )
+        + "\n"
     )
     success = True
 except BaseException:

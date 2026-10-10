@@ -4,6 +4,7 @@ All sensor/task modules are deterministic CPU fixtures; this is not runtime
 capture evidence. The actual collector, NPZ writer and shutdown code run.
 """
 
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -49,11 +50,20 @@ class OmegaConf:
 
 install("omegaconf", OmegaConf=OmegaConf)
 
+class RigidObject(SimpleNamespace):
+    pass
+
 class Env:
     dt = .04
     env_seed_list = [0]
     def __init__(self, cfg, app, **kwargs):
         assert cfg.tactile["enabled"], "TacSL config was not passed to environment"
+        assert cfg.saved_layouts[0]["Rigid"]["test_object"], "Layout must exist before task construction"
+        objects = {} if mode == "empty_scene" else {"test": RigidObject(prim_path="/World/test")}
+        self.scene_manager = SimpleNamespace(
+            _rigid_and_dynamic_objects=[objects],
+            stage=SimpleNamespace(GetPrimAtPath=lambda path: SimpleNamespace(IsValid=lambda: True)),
+        )
     def reset(self, **kwargs): pass
     def sim_step(self, **kwargs): pass
     def close(self):
@@ -73,7 +83,7 @@ class Obs:
         return {0: frame}
 
 install("env.observation_manager.obs_manager", ObsManager=Obs)
-install("task.RoboDojo.task_registry", load_task_class=lambda task: (None, Env))
+install("task.RoboDojo.task_registry", load_task_class=lambda task: (task, Env))
 
 def load_yaml(path):
     if "/env_cfg/arx_x5" in str(path):
@@ -91,7 +101,17 @@ def visualize(path):
 
 install("reproduction.visualize_multimodal", visualize=visualize)
 mode, output = sys.argv[1:]
-sys.argv = ["collect_multimodal.py", "--frames", "1", "--warmup-steps", "0", "--output", output]
+import utils.isaaclab_compat as compat
+
+def enable_extensions():
+    if mode == "extension_failure":
+        raise RuntimeError("deliberate legacy extension initialization failure")
+
+compat.enable_legacy_isaacsim_extensions = enable_extensions
+layout_file = Path(output) / "test-layout.json"
+layout_file.write_text('{"Rigid":{"test_object":[{}]}}')
+sys.argv = ["collect_multimodal.py", "--frames", "1", "--warmup-steps", "0", "--output", output,
+            "--layout-file", str(layout_file)]
 if mode == "visualization_failure":
     sys.argv.append("--visualize")
 runpy.run_path("reproduction/collect_multimodal.py", run_name="__main__")
@@ -113,6 +133,24 @@ class CollectorExitTests(unittest.TestCase):
             result = self.run_collector("success", directory)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((Path(directory) / "validation.json").exists())
+            validation = json.loads((Path(directory) / "validation.json").read_text())
+            self.assertEqual(validation["scene"]["actual_object_counts"]["rigid_and_dynamic_objects"], 1)
+            self.assertEqual(len(validation["layout"]["sha256"]), 64)
+
+    def test_missing_task_objects_never_produce_successful_recording(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_collector("empty_scene", directory)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("saved layout requires 1", result.stderr)
+            self.assertFalse((Path(directory) / "validation.json").exists())
+            self.assertFalse((Path(directory) / "manifest.json").exists())
+
+    def test_extension_startup_failure_survives_direct_process_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_collector("extension_failure", directory)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("deliberate legacy extension initialization failure", result.stderr)
+            self.assertFalse((Path(directory) / "validation.json").exists())
 
     def test_environment_cleanup_failure_survives_direct_process_exit(self):
         with tempfile.TemporaryDirectory() as directory:

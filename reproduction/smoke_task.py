@@ -15,8 +15,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--task", default="stack_bowls")
 parser.add_argument("--env-cfg", default="arx_x5_rgbd")
 parser.add_argument("--output", type=Path, default=ROOT / "reproduction/task-smoke.json")
+parser.add_argument("--layout-config", default="arx_x5")
+parser.add_argument("--layout-id", type=int, default=0)
+parser.add_argument("--layout-file", type=Path)
 add_app_launcher_args(parser, AppLauncher)
 args = parser.parse_args()
+args.output.unlink(missing_ok=True)
 args.enable_cameras = True
 from env.camera_manager.capture.render_sync import add_zero_delay_kit_args
 
@@ -25,12 +29,16 @@ launcher = AppLauncher(args)
 app = launcher.app
 success = False
 try:
+    from utils.isaaclab_compat import enable_legacy_isaacsim_extensions
+
+    enable_legacy_isaacsim_extensions()
     import numpy as np
     from omegaconf import OmegaConf
 
     from env.observation_manager.obs_manager import ObsManager
     from task.RoboDojo.task_registry import load_task_class
     from utils.load_file import load_yaml
+    from utils.task_layout import load_task_layout, verify_task_scene
 
     eval_cfg = load_yaml(str(ROOT / "env_cfg" / (args.env_cfg + ".yml")))
     cfg = OmegaConf.create(
@@ -44,9 +52,14 @@ try:
     cfg.sim.device = "cuda:0"
     cfg.sim.seed = [0]
     cfg.camera.default_frequency = eval_cfg["observation"]["collect_freq"]
+    layout, layout_provenance = load_task_layout(
+        ROOT, args.task, layout_config=args.layout_config, layout_id=args.layout_id, layout_file=args.layout_file
+    )
+    cfg.saved_layouts = [layout]
     _, task_class = load_task_class(args.task)
     env = task_class(cfg, app, seed=0)
     env.reset(seed=0)
+    scene_evidence = verify_task_scene(env.scene_manager, layout)
     obs_cfg = eval_cfg["observation"]
     obs_cfg["vision"].update(depth=True, intrinsic_matrix=True, extrinsic_matrix=True)
     obs = ObsManager(obs_cfg, 1, env.dt, args.task, {}, seeds_per_env=env.env_seed_list)
@@ -84,6 +97,8 @@ try:
         "checks": ["task scene initialization", "robot reset", "RGBD observation capture"],
         "camera_shapes": shapes,
         "policy_evaluation": False,
+        "layout": layout_provenance,
+        "scene": scene_evidence,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n")

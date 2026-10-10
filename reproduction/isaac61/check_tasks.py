@@ -22,9 +22,23 @@ import subprocess
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
-SCHEMA = "robodojo.task-scene-smoke.v1"
+SCHEMA = "robodojo.task-scene-smoke.v2"
 CAMERAS = {"head", "left_wrist", "right_wrist"}
 REQUIRED_CHECKS = {"task scene initialization", "robot reset", "RGBD observation capture"}
+OBJECT_STORAGES = {
+    "Rigid": "rigid_and_dynamic_objects",
+    "Dynamic": "rigid_and_dynamic_objects",
+    "Articulation": "articulation_objects",
+    "Garment": "garment_objects",
+    "Geometry": "geometry_objects",
+    "Fluid": "fluid_objects",
+}
+GENERATED_REPORTS = {
+    "reproduction/doctor.json",
+    "reproduction/runtime-smoke.json",
+    "reproduction/task-smoke.json",
+    "reproduction/task-inventory.json",
+}
 CHILD_LAUNCH = (
     "source reproduction/isaac61/environment.sh; "
     "exec bash reproduction/isaac61/run.sh python reproduction/smoke_task.py "
@@ -37,7 +51,7 @@ def git(*args, cwd=ROOT):
 
 
 def source_identity(root=ROOT):
-    """Hash tracked/untracked owned files and actual submodule source changes."""
+    """Hash runtime sources, excluding generated logs and reproduction evidence."""
     digest = hashlib.sha256()
     paths = (
         subprocess.check_output(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=root)
@@ -46,6 +60,8 @@ def source_identity(root=ROOT):
     )
     for relative in sorted(set(paths) - {""}):
         path = root / relative
+        if path.suffix == ".log" or relative in GENERATED_REPORTS:
+            continue
         digest.update(relative.encode())
         if path.is_file():
             digest.update(path.read_bytes())
@@ -85,6 +101,60 @@ def inventory_tasks():
     return [task["name"] for task in module.build_inventory()["tasks"] if task["runnable"]]
 
 
+def check_scene_evidence(evidence, task):
+    """Require the recorded layout bytes and live objects, independent of status."""
+    layout, scene = evidence.get("layout", {}), evidence.get("scene", {})
+    if layout.get("task") != task or not layout.get("file") or scene.get("env_id") != 0:
+        raise ValueError("Missing task layout provenance or live scene environment")
+    path = Path(layout["file"])
+    if not path.is_absolute():
+        raise ValueError("Task layout provenance must contain an absolute file path")
+    raw = path.read_bytes()
+    if layout.get("sha256") != hashlib.sha256(raw).hexdigest():
+        raise ValueError("Saved task layout SHA256 differs from current layout bytes")
+    source_layout = json.loads(raw)
+    expected = {
+        category: sum(len(instances) for instances in source_layout.get(category, {}).values())
+        for category in OBJECT_STORAGES
+    }
+    if not sum(expected.values()):
+        raise ValueError("Task layout is empty; fixtures cannot certify task scene loading")
+    if layout.get("expected_object_counts") != expected or scene.get("expected_object_counts") != expected:
+        raise ValueError("Reported expected object counts differ from the actual saved layout")
+    storage_counts = dict.fromkeys(OBJECT_STORAGES.values(), 0)
+    observed_types = dict.fromkeys(OBJECT_STORAGES, 0)
+    observed_paths = []
+    wrappers = scene.get("wrapper_types", {})
+    for category, storage in OBJECT_STORAGES.items():
+        storage_counts[storage] += expected[category]
+    for storage, required in storage_counts.items():
+        actual = scene.get("actual_object_counts", {}).get(storage)
+        paths = scene.get("object_prim_paths", {}).get(storage)
+        if not isinstance(actual, int) or isinstance(actual, bool) or actual < required:
+            raise ValueError(f"Missing live {storage}: expected at least {required}, received {actual}")
+        if not isinstance(paths, list) or len(paths) != actual or len(set(paths)) != actual:
+            raise ValueError(f"Live {storage} counts do not match unique USD prim paths")
+        if any(not isinstance(prim, str) or not prim.startswith("/World/envs/env_0/") for prim in paths):
+            raise ValueError(f"Task {storage} prim path is outside the accepted environment")
+        for prim in paths:
+            wrapper = wrappers.get(prim, {})
+            physical_type = wrapper.get("physical_type")
+            if physical_type not in OBJECT_STORAGES or OBJECT_STORAGES[physical_type] != storage:
+                raise ValueError(f"Unrecognized or wrongly registered physical wrapper at {prim}")
+            if not wrapper.get("class") or not wrapper.get("instance_name"):
+                raise ValueError(f"Missing actual physics wrapper class or instance at {prim}")
+            if wrapper.get("layout_type") != physical_type.lower():
+                raise ValueError(f"Saved physical type differs from live wrapper at {prim}")
+            observed_types[physical_type] += 1
+        observed_paths.extend(paths)
+    if set(wrappers) != set(observed_paths) or len(set(observed_paths)) != len(observed_paths):
+        raise ValueError("Reported physics wrappers must match unique live object prim paths")
+    if scene.get("actual_physical_type_counts") != observed_types:
+        raise ValueError("Reported physical object counts disagree with actual wrapper inventory")
+    if any(observed_types[category] < required for category, required in expected.items()):
+        raise ValueError("Shared storage counts cannot certify the requested physical object types")
+
+
 def check_evidence(evidence, task, env_cfg):
     """Validate smoke output structure independently of its status string."""
     if evidence.get("status") != "passed" or evidence.get("task") != task or evidence.get("env_cfg") != env_cfg:
@@ -99,6 +169,7 @@ def check_evidence(evidence, task, env_cfg):
         raise ValueError("Smoke must identify the Isaac Lab source commit")
     if not REQUIRED_CHECKS.issubset(evidence.get("checks", [])):
         raise ValueError("Missing scene/reset/RGBD acceptance checks")
+    check_scene_evidence(evidence, task)
     cameras = {name.removeprefix("cam_"): shape for name, shape in evidence.get("camera_shapes", {}).items()}
     if set(cameras) != CAMERAS:
         raise ValueError(f"Expected head and both wrist RGBD cameras, received {sorted(cameras)}")
@@ -118,7 +189,7 @@ def can_resume(record, context, task, env_cfg):
         return False
     try:
         check_evidence(record.get("evidence", {}), task, env_cfg)
-    except (ValueError, TypeError, AttributeError):
+    except (OSError, ValueError, TypeError, AttributeError):
         return False
     return (
         record.get("process_exit_code") == 0
