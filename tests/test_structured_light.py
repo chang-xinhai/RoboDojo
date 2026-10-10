@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -14,6 +15,28 @@ spec.loader.exec_module(sl)
 
 
 class StructuredLightTests(unittest.TestCase):
+    def test_native_camera_dependencies_enable_extension_before_import(self):
+        from types import SimpleNamespace
+
+        enabled = []
+        camera, sensor, rtx_camera = object(), object(), object()
+        original_import = __import__
+
+        def import_with_optional_extension(name, *args, **kwargs):
+            if name == "isaacsim.core.utils.extensions":
+                return SimpleNamespace(enable_extension=enabled.append)
+            if name in ("isaacsim.core.experimental.objects", "isaacsim.sensors.experimental.rtx"):
+                # Reproduce the canonical experience: native modules become
+                # importable only after Kit enables their optional extension.
+                if "isaacsim.sensors.experimental.rtx" not in enabled:
+                    raise ModuleNotFoundError(name)
+                return SimpleNamespace(Camera=camera, CameraSensor=sensor, RtxCamera=rtx_camera)
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=import_with_optional_extension):
+            self.assertEqual(sl._load_native_camera_types(), (camera, sensor, rtx_camera))
+        self.assertEqual(enabled, ["isaacsim.sensors.experimental.rtx"])
+
     def test_physics_timestamp_accepts_lab3_and_legacy_sim(self):
         from types import SimpleNamespace
 

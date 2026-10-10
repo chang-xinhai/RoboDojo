@@ -145,13 +145,25 @@ def generate_projector_assets(directory, *, seed=7, resolution=(640, 480), fov_d
     return pattern, lut
 
 
+def _load_native_camera_types():
+    """Enable native camera dependencies for every Kit experience at capture entry."""
+    from isaacsim.core.utils.extensions import enable_extension
+
+    # IsaacLab's canonical experience does not enable this optional extension.
+    # Enable it before importing its modules or the experimental core dependency.
+    enable_extension("isaacsim.sensors.experimental.rtx")
+    from isaacsim.core.experimental.objects import Camera as CameraAuthoring
+    from isaacsim.sensors.experimental.rtx import CameraSensor, RtxCamera
+
+    return CameraAuthoring, CameraSensor, RtxCamera
+
+
 class StructuredLightCapture:
     """One mounted stereo/projector rig per existing RoboDojo RGB camera."""
 
     def __init__(self, manager, config):
-        from isaacsim.core.experimental.objects import Camera as CameraAuthoring
+        CameraAuthoring, CameraSensor, RtxCamera = _load_native_camera_types()
         from isaacsim.core.utils.stage import get_current_stage
-        from isaacsim.sensors.experimental.rtx import CameraSensor, RtxCamera
         import omni.replicator.core as rep
         from pxr import Gf, Sdf, UsdGeom, UsdLux
 
