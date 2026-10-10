@@ -41,26 +41,44 @@ Exact Isaac Sim `6.1.0.0` plane and rotated-rig validation passed with projector
 intensity 1500 and saturation radiance 5500. All three rigs reconstructed the
 known one-meter plane with median depth 1.0 m and 79.98–80.00% valid pixels.
 At 1.25 m with the entire rig rolled 30 degrees, median reconstructed depth
-was 1.28 m (2.4% median error), with 79.98–80.00% valid pixels. Both runs had
+was 1.28 m (2.4% offset of the median depth), with 79.98–80.00% valid pixels.
+The pixelwise median relative error was 4.30%, as recorded separately in each
+run's `strict-audit.json`. Both runs had
 zero saturated IR pixels; rendered optical-pose errors were zero for the
 unrotated rig and below `2.85e-8` for the rotated rig. These checks cover the
 native projector, stereo geometry, frame conventions, exposure, and delivered
 render-product calibration. Moving robot capture and task-specific occlusions
 require the integrated task validation.
 
+A further exact `6.1.0.0` run rotates the actual target plane 30 degrees about
+world Y while its visible surface center remains at the world origin. An
+analytic ray-plane reference uses each delivered optical pose and intrinsic
+matrix, including raster pixel centers. Across head, left wrist, and right
+wrist, median relative reconstruction errors were 2.30%, 1.91%, and 2.64%;
+center-ROI absolute errors were 1.44 cm, 0.065 cm, and 3.17 cm. Valid stereo
+coverage was 79.88–79.93%. Ground-truth depth agreed with the analytic reference
+within `9.5e-8` m median absolute error. The reconstructed depth's 10th-to-90th
+percentile ranges were 1.03, 0.95, and 1.12 m, confirming reconstruction of a
+surface with varying depth. The live script enforces median relative error at
+most 5%, center-ROI absolute error at most 8 cm, ground-truth error below 1 mm,
+and both ground-truth and reconstructed depth variation above 2 cm.
+
 The local evidence includes complete calibration matrices, numeric reports,
 raw image/depth NPZ files, and labeled galleries:
 
 - `reproduction/isaac61/outputs/sl-plane-61/{report.json,structured_light.png}`
 - `reproduction/isaac61/outputs/sl-rotated-61/{report.json,structured_light.png}`
+- `reproduction/isaac61/outputs/sl-tilted-plane-61/{report.json,structured_light.png}`
 
-Reproduce both checks using the isolated Kit cache configured by the wrapper:
+Reproduce the checks using the isolated Kit cache configured by the wrapper:
 
 ```sh
 bash reproduction/isaac61/run.sh python scripts/check_structured_light_live.py \
   --output reproduction/isaac61/outputs/sl-plane-61
 bash reproduction/isaac61/run.sh python scripts/check_structured_light_live.py \
   --distance 1.25 --roll-deg 30 --output reproduction/isaac61/outputs/sl-rotated-61
+bash reproduction/isaac61/run.sh python scripts/check_structured_light_live.py \
+  --plane-tilt-deg 30 --output reproduction/isaac61/outputs/sl-tilted-plane-61
 ```
 
 Capture freezes physics while rendering the ambient and active phases. Each
@@ -74,7 +92,7 @@ projector off in `finally`, including renderer failures. Launch with the existin
 CPU contracts are checked with:
 
 ```sh
-python -m unittest discover -s tests -p test_structured_light.py -v
+python -m unittest discover -s tests -p 'test_structured_light*.py' -v
 ```
 
 These tests verify stereo metric geometry, illumination isolation, invalid-depth

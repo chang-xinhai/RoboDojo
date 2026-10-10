@@ -18,6 +18,27 @@ import traceback
 from types import SimpleNamespace
 
 
+def plane_reference_depth(shape, intrinsics, world_from_optical, tilt_deg):
+    """Optical-axis depth for the known plane through world origin, tilted about Y.
+
+    CameraParams uses raster coordinates spanning [0, width]/[0, height],
+    so pixel (row, col) is sampled at (col + 0.5, row + 0.5).
+    """
+    import numpy as np
+
+    k = np.asarray(intrinsics, dtype=np.float64)
+    pose = np.asarray(world_from_optical, dtype=np.float64)
+    rows, cols = np.indices(shape, dtype=np.float64)
+    rays = np.stack(((cols + 0.5 - k[0, 2]) / k[0, 0], (rows + 0.5 - k[1, 2]) / k[1, 1], np.ones(shape)), axis=-1)
+    tilt = np.deg2rad(tilt_deg)
+    normal = np.array([np.sin(tilt), 0.0, np.cos(tilt)])
+    denominator = np.einsum("i,ij,hwj->hw", normal, pose[:3, :3], rays)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        depth = -(normal @ pose[:3, 3]) / denominator
+    depth[(depth <= 0) | ~np.isfinite(depth)] = np.nan
+    return depth
+
+
 def main():
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser()
@@ -26,7 +47,10 @@ def main():
     parser.add_argument("--saturation-radiance", type=float, default=5500)
     parser.add_argument("--distance", type=float, default=1.0)
     parser.add_argument("--roll-deg", type=float, default=0.0)
+    parser.add_argument("--plane-tilt-deg", type=float, default=0.0)
     args = parser.parse_args()
+    if not -45 < args.plane_tilt_deg < 45:
+        parser.error("--plane-tilt-deg must be between -45 and 45 degrees")
     sys.path.insert(0, str(root))
     args.output = args.output.expanduser().resolve()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -65,7 +89,15 @@ def main():
         rep.settings.set_render_rtx_realtime(antialiasing="Off")
         sim = SimulationContext(physics_dt=1 / 60, rendering_dt=1 / 60, stage_units_in_meters=1)
         stage = get_current_stage()
-        plane = UsdGeom.Cube.Define(stage, "/World/target")
+        # Rotate the target surface around its center at world z=0, rather
+        # than changing only the camera orientation. Offset thickness along
+        # the rotated normal so the visible surface center remains fixed.
+        target = UsdGeom.Xform.Define(stage, "/World/target")
+        half_tilt = np.deg2rad(args.plane_tilt_deg) / 2
+        UsdGeom.Xformable(target).AddOrientOp().Set(
+            Gf.Quatf(float(np.cos(half_tilt)), 0.0, float(np.sin(half_tilt)), 0.0)
+        )
+        plane = UsdGeom.Cube.Define(stage, "/World/target/surface")
         plane.CreateSizeAttr(1.0)
         xform = UsdGeom.Xformable(plane)
         xform.AddTranslateOp().Set(Gf.Vec3d(0, 0, -0.025))
@@ -141,6 +173,13 @@ def main():
             physics_timestamp_ns=round(sim.current_time * 1e9),
             reference_distance_m=args.distance,
             reference_roll_deg=args.roll_deg,
+            plane_tilt_deg=args.plane_tilt_deg,
+            validation_thresholds=dict(
+                stereo_median_relative_error=0.05,
+                stereo_center_abs_error_m=0.08,
+                ground_truth_plane_median_abs_error_m=0.001,
+                minimum_depth_spatial_range_m=0.02,
+            ),
         )
         montage = Image.new("RGB", (320 * 4, 240 * 3 + 24))
         draw = ImageDraw.Draw(montage)
@@ -154,6 +193,41 @@ def main():
             finite = np.isfinite(depth)
             median = float(np.nanmedian(depth)) if finite.any() else None
             ir = frame["ir_left"]
+            calibration = frame["calibration"]
+            reference = plane_reference_depth(
+                depth.shape,
+                calibration["K_by_view"]["ir_left"],
+                calibration["T_world_from_optical"]["ir_left"],
+                args.plane_tilt_deg,
+            )
+            center = np.s_[
+                depth.shape[0] // 2 - 8 : depth.shape[0] // 2 + 8, depth.shape[1] // 2 - 8 : depth.shape[1] // 2 + 8
+            ]
+            center_depth = float(np.nanmedian(depth[center])) if np.isfinite(depth[center]).any() else None
+            center_reference = float(np.nanmedian(reference[center]))
+            matched = finite & np.isfinite(reference)
+            reference_error = (
+                float(np.nanmedian(np.abs(depth[matched] - reference[matched]))) if matched.any() else None
+            )
+            relative_error = (
+                float(np.nanmedian(np.abs(depth[matched] - reference[matched]) / reference[matched]))
+                if matched.any()
+                else None
+            )
+            sl_range = float(np.diff(np.nanpercentile(depth[finite], [10, 90]))[0]) if finite.any() else 0.0
+            gt = frame["depth_gt"]
+            gt_valid = np.isfinite(gt) & (gt > 0) & (gt < 10)
+            gt_range = float(np.diff(np.nanpercentile(gt[gt_valid], [10, 90]))[0]) if gt_valid.any() else 0.0
+            gt_reference = plane_reference_depth(
+                gt.shape,
+                calibration["K_by_view"]["rgb"],
+                calibration["T_world_from_optical"]["rgb"],
+                args.plane_tilt_deg,
+            )
+            gt_matched = gt_valid & np.isfinite(gt_reference)
+            gt_reference_error = (
+                float(np.nanmedian(np.abs(gt[gt_matched] - gt_reference[gt_matched]))) if gt_matched.any() else None
+            )
             quality = dict(
                 ir_nonzero_fraction=float((ir > 0).mean()),
                 ir_std=float(ir.std()),
@@ -163,6 +237,14 @@ def main():
                 depth_gt_median_m=float(np.nanmedian(frame["depth_gt"])),
                 timestamp_ns=frame["timestamp_ns"],
                 calibration=frame["calibration"],
+                reference_center_depth_m=center_reference,
+                stereo_center_depth_m=center_depth,
+                stereo_plane_median_abs_error_m=reference_error,
+                stereo_plane_median_relative_error=relative_error,
+                stereo_center_abs_error_m=abs(center_depth - center_reference) if center_depth is not None else None,
+                stereo_depth_spatial_range_p10_p90_m=sl_range,
+                depth_gt_spatial_range_p10_p90_m=gt_range,
+                depth_gt_plane_median_abs_error_m=gt_reference_error,
             )
             report["sensors"][name] = quality
             if (
@@ -170,8 +252,15 @@ def main():
                 or quality["ir_std"] < 1
                 or quality["stereo_valid_fraction"] < 0.1
                 or median is None
-                or abs(median - args.distance) > 0.15
+                or center_depth is None
+                or abs(center_depth - center_reference) > 0.08
+                or relative_error is None
+                or relative_error > 0.05
+                or gt_reference_error is None
+                or gt_reference_error > 0.001
             ):
+                failed.append(name)
+            if abs(args.plane_tilt_deg) > 1e-6 and (gt_range < 0.02 or sl_range < 0.02):
                 failed.append(name)
             expected_optical = extrinsics(row, 0) @ np.diag([1.0, -1.0, -1.0, 1.0])
             optical = np.asarray(frame["calibration"]["T_world_from_optical"]["rgb"])
