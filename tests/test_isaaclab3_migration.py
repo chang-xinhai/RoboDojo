@@ -134,3 +134,38 @@ def test_launcher_preserves_existing_options():
     add_app_launcher_args(parser, launcher)
     args = parser.parse_args(["--headless", "--enable_cameras", "--viz", "none"])
     assert args.headless and args.enable_cameras and args.viz == "none"
+
+
+@pytest.mark.parametrize("value", [None, 1, np.array(1)])
+def test_scalar_pose_inputs_raise_clear_value_error(value):
+    with pytest.raises(ValueError, match="Expected quaternion"):
+        wxyz_to_xyzw(value)
+    with pytest.raises(ValueError, match="Expected pose"):
+        pose_xyzw_to_wxyz(value)
+
+
+@pytest.mark.parametrize("requires_readback", [False, True])
+def test_particle_pipeline_selector_preserves_cuda_manager(requires_readback, monkeypatch):
+    monkeypatch.setattr("utils.legacy_prim_adapter.install_legacy_prim_adapter", lambda: (object(), ()))
+    physics_manager = SimpleNamespace(device="cuda:0")
+    settings = {}
+    cls = load_class(
+        "env/environment/base_env.py",
+        "BaseEnv",
+        gym=SimpleNamespace(Env=object),
+        Any=object,
+        IsaacRLEnv=object,
+        get_physx_interface=lambda: object(),
+    )
+    instance = cls.__new__(cls)
+    instance._requires_particle_readback = requires_readback
+    context = SimpleNamespace(physics_manager=physics_manager, set_setting=settings.__setitem__)
+    instance.setup_physics(SimpleNamespace(sim=context))
+    assert instance.physics_context is physics_manager
+    assert instance.physics_context.device == "cuda:0"
+    if requires_readback:
+        assert settings["/physics/suppressReadback"] is False
+        assert settings["/physics/updateParticlesToUsd"] is True
+        assert settings["/isaaclab/robodojo/particle_readback"] is True
+    else:
+        assert settings == {}

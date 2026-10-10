@@ -29,6 +29,39 @@ def as_torch(value):
     return getattr(value, "torch", value)
 
 
+def enable_legacy_isaacsim_extensions(extension_manager=None):
+    """Enable actual RoboDojo prim/camera wrappers after AppLauncher starts Kit.
+
+    Isaac Lab 3 launches a minimal experience which omits these Isaac Sim
+    extensions. Enable them before importing legacy RoboDojo managers. This
+    does not create a second SimulationContext or change the physics backend.
+    The optional manager supports checking the exact extension requirements
+    without launching Kit.
+    """
+    if extension_manager is None:
+        from importlib.metadata import distribution
+        from pathlib import Path
+
+        import isaacsim
+        import omni.kit.app
+
+        extension_manager = omni.kit.app.get_app().get_extension_manager()
+        # Sim 6 ships the legacy APIs in extsDeprecated; the minimal Lab 3
+        # experience searches only the main extension folders by default.
+        package_paths = list(isaacsim.__path__) + [distribution("isaacsim").locate_file("isaacsim")]
+        for package_path in package_paths:
+            legacy_path = Path(package_path) / "extsDeprecated"
+            if legacy_path.is_dir():
+                extension_manager.add_path(str(legacy_path))
+        extension_manager.process_and_apply_all_changes()
+    for name in ("isaacsim.core.api", "isaacsim.sensors.camera", "isaacsim.replicator.behavior"):
+        if extension_manager.is_extension_enabled(name):
+            continue
+        extension_manager.set_extension_enabled_immediate(name, True)
+        if not extension_manager.is_extension_enabled(name):
+            raise RuntimeError(f"Isaac Sim extension failed to initialize: {name}")
+
+
 def simulation_snapshot(context):
     """Return (simulation seconds, monotonic physics frame) without stepping.
 
@@ -47,8 +80,9 @@ def _reorder_quaternion(value, indices):
     value = as_torch(value)
     if isinstance(value, (tuple, list)):
         value = np.asarray(value)
-    if not hasattr(value, "shape") or len(value.shape) == 0 or value.shape[-1] != 4:
-        raise ValueError(f"Expected quaternion (..., 4), received {value.shape}")
+    shape = getattr(value, "shape", None)
+    if shape is None or len(shape) == 0 or shape[-1] != 4:
+        raise ValueError(f"Expected quaternion (..., 4), received {shape}")
     return value[..., indices]
 
 
@@ -65,8 +99,9 @@ def pose_xyzw_to_wxyz(value):
     value = as_torch(value)
     if isinstance(value, (tuple, list)):
         value = np.asarray(value)
-    if not hasattr(value, "shape") or len(value.shape) == 0 or value.shape[-1] != 7:
-        raise ValueError(f"Expected pose (..., 7), received {value.shape}")
+    shape = getattr(value, "shape", None)
+    if shape is None or len(shape) == 0 or shape[-1] != 7:
+        raise ValueError(f"Expected pose (..., 7), received {shape}")
     return value[..., [0, 1, 2, 6, 3, 4, 5]]
 
 

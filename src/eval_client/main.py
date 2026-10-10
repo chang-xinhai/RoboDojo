@@ -134,6 +134,10 @@ add_zero_delay_kit_args(args_cli)
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
+from utils.isaaclab_compat import enable_legacy_isaacsim_extensions
+
+enable_legacy_isaacsim_extensions()
+
 from omegaconf import OmegaConf
 
 from env.global_configs import *

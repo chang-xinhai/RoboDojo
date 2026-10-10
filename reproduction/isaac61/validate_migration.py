@@ -74,10 +74,16 @@ def validate_static():
 def validate_runtime_imports(report, args):
     from isaaclab.app import AppLauncher
 
-    launcher = AppLauncher(args)
-    app = launcher.app
+    app = None
     report["runtime_import_requested"] = True
     try:
+        app = AppLauncher(args).app
+        from utils.isaaclab_compat import enable_legacy_isaacsim_extensions
+
+        # Imports require the real legacy prim/camera/MDL extensions omitted
+        # from Lab 3's minimal experience. The prim facade is installed later
+        # by BaseEnv.setup_physics when a task actually owns a PhysX context.
+        enable_legacy_isaacsim_extensions()
         from task.RoboDojo.task_registry import load_task_class
 
         for task in report["inventory"]["tasks"]:
@@ -91,8 +97,38 @@ def validate_runtime_imports(report, args):
                 report["issues"].append(
                     {"path": task["module"], "check": "runtime_import", "error": traceback.format_exc()}
                 )
+    except Exception:
+        report["issues"].append(
+            {"path": "utils/isaaclab_compat.py", "check": "runtime_bootstrap", "error": traceback.format_exc()}
+        )
     finally:
-        app.close()
+        # Kit fast shutdown may terminate the process without returning to
+        # main; both success and failure artifacts must exist before close.
+        finalize_report(report, args)
+        if app is not None:
+            app.close(exit_code=int(bool(report["issues"])), wait_for_replicator=False, skip_cleanup=True)
+
+
+def finalize_report(report, args):
+    report["status"] = "passed" if not report["issues"] else "failed"
+    output = getattr(args, "output", None)
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(
+        json.dumps(
+            {
+                "status": report["status"],
+                "python_files": report.get("python_files_checked"),
+                "yaml_files": report.get("yaml_files_checked"),
+                "tasks": report["inventory"].get("counts"),
+                "runtime_imports": sum(task["runtime_import"] == "passed" for task in report["inventory"]["tasks"]),
+                "issues": report["issues"],
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
 
 
 def main():
@@ -107,27 +143,13 @@ def main():
 
         add_app_launcher_args(parser, AppLauncher)
     args = parser.parse_args()
+    if args.output:
+        args.output.unlink(missing_ok=True)
     report = validate_static()
     if args.runtime_import:
         validate_runtime_imports(report, args)
-    report["status"] = "passed" if not report["issues"] else "failed"
-    rendered = json.dumps(report, indent=2, sort_keys=True)
-    if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(rendered + "\n", encoding="utf-8")
-    print(
-        json.dumps(
-            {
-                "status": report["status"],
-                "python_files": report["python_files_checked"],
-                "yaml_files": report["yaml_files_checked"],
-                "tasks": report["inventory"]["counts"],
-                "runtime_imports": sum(task["runtime_import"] == "passed" for task in report["inventory"]["tasks"]),
-                "issues": report["issues"],
-            },
-            indent=2,
-        )
-    )
+    else:
+        finalize_report(report, args)
     return int(bool(report["issues"]))
 
 

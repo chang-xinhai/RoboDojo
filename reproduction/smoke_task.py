@@ -18,6 +18,7 @@ parser.add_argument("--output", type=Path, default=ROOT / "reproduction/task-smo
 parser.add_argument("--layout-config", default="arx_x5")
 parser.add_argument("--layout-id", type=int, default=0)
 parser.add_argument("--layout-file", type=Path)
+parser.add_argument("--enable-planner", action="store_true", help="Also initialize production planners")
 add_app_launcher_args(parser, AppLauncher)
 args = parser.parse_args()
 args.output.unlink(missing_ok=True)
@@ -51,6 +52,9 @@ try:
     cfg.sim.scene.num_envs = 1
     cfg.sim.device = "cuda:0"
     cfg.sim.seed = [0]
+    if not args.enable_planner:
+        for robot in cfg.robot.robots:
+            robot.need_planner = False
     cfg.camera.default_frequency = eval_cfg["observation"]["collect_freq"]
     layout, layout_provenance = load_task_layout(
         ROOT, args.task, layout_config=args.layout_config, layout_id=args.layout_id, layout_file=args.layout_file
@@ -97,6 +101,7 @@ try:
         "checks": ["task scene initialization", "robot reset", "RGBD observation capture"],
         "camera_shapes": shapes,
         "policy_evaluation": False,
+        "planner_initialized": args.enable_planner,
         "layout": layout_provenance,
         "scene": scene_evidence,
     }

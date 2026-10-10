@@ -16,6 +16,16 @@ class TaskEnv(BaseEnv):
         self.env_spacing = self.sim_config.scene.env_spacing
         self.device = self.sim_config.get("device", "cpu")
         self.dt = self.sim_config.dt
+        # PBD fluid rewards and resets require current particle positions in
+        # USD. Select GPU dynamics with host readback before PhysX warmup.
+        self._requires_particle_readback = bool(config.task_env.get("Fluid")) or bool(
+            self.sim_config.get("particle_readback", False)
+        )
+        if self._requires_particle_readback and config.task_env.get("Garment"):
+            raise NotImplementedError(
+                "PBD fluid host readback and surface deformable garment tensors require different PhysX pipelines; "
+                "run fluid and garment tasks in separate simulation contexts."
+            )
 
         # RobotManager must be created before BaseEnv.__init__ because it
         # provides the InteractiveSceneCfg used to launch the simulation.
@@ -42,6 +52,12 @@ class TaskEnv(BaseEnv):
             scene_config=self.scene_config,
             task_config=config.task_env,
         )
+        saved_layouts = config.get("saved_layouts")
+        if saved_layouts is not None:
+            if len(saved_layouts) != self.num_envs:
+                raise ValueError(f"saved_layouts has {len(saved_layouts)} entries, expected {self.num_envs}")
+            for env_idx, layout in enumerate(saved_layouts):
+                self.scene_manager.layout_manager.set_saved_layout(env_idx, layout)
         self.tactile_manager = TactileManager(
             self.num_envs,
             config=config.get("tactile", {}),

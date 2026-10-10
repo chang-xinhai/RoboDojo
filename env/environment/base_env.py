@@ -6,7 +6,7 @@ from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaacsim.core.utils.stage import get_current_stage
 from omegaconf import DictConfig, OmegaConf
-from omni.physx import acquire_physx_interface
+from omni.physx import get_physx_interface
 
 from env.environment.isaac.isaac_rl_env import IsaacRLEnv, IsaacRLEnvCfg
 from env.seeding import seed_everywhere
@@ -207,10 +207,24 @@ class BaseEnv(gym.Env):
         This function will be called after simulation context is created
         """
         # enable cpu garment and deformable
-        self.physics_interface = acquire_physx_interface()
+        self.physics_interface = get_physx_interface()
         # Preserve the configured backend/device. Forcing the GPU setting here
         # made the CPU garment path inconsistent with the simulation config.
         self.physics_context = sim.sim.physics_manager
+        from utils.legacy_prim_adapter import install_legacy_prim_adapter
+
+        self._legacy_prim_manager, _ = install_legacy_prim_adapter()
+        if getattr(self, "_requires_particle_readback", False):
+            # PhysxCfg has no readback selector in 3.0 EA. Its manager enables
+            # DirectGPU for every CUDA device during context construction.
+            # Override before the first stage attach/warmup, while preserving
+            # CUDA device and GPU dynamics. DirectGPU disables the host state
+            # that native PBD particles need for task rewards and reset.
+            sim.sim.set_setting("/physics/suppressReadback", False)
+            sim.sim.set_setting("/physics/updateToUsd", True)
+            sim.sim.set_setting("/physics/updateParticlesToUsd", True)
+            sim.sim.set_setting("/isaaclab/robodojo/particle_readback", True)
+            print("[RoboDojo] PBD fluid pipeline: GPU dynamics with particle readback enabled.")
 
     def close(self):
         try:
