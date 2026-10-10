@@ -25,6 +25,11 @@ parser.add_argument("--warmup-steps", type=int, default=10)
 parser.add_argument("--output", type=Path, default=ROOT / "reproduction" / "isaac61" / "outputs" / "multimodal-capture")
 parser.add_argument("--visualize", action="store_true")
 parser.add_argument(
+    "--motion-demo", action="store_true", help="Command both wrist joints with a small real sine motion."
+)
+parser.add_argument("--motion-amplitude", type=float, default=0.03, help="Wrist amplitude in rad, at most 0.05.")
+parser.add_argument("--motion-frequency", type=float, default=0.5, help="Wrist sine frequency in Hz, at most 1.")
+parser.add_argument(
     "--min-sl-valid-fraction",
     type=float,
     default=0.001,
@@ -36,6 +41,10 @@ add_app_launcher_args(parser, AppLauncher)
 args = parser.parse_args()
 if args.frames < 1 or args.warmup_steps < 0 or not 0 <= args.min_sl_valid_fraction <= 1:
     parser.error("frames must be positive, warmup-steps nonnegative and min-sl-valid-fraction in [0,1]")
+if args.motion_demo and (
+    args.frames < 2 or not 0 < args.motion_amplitude <= 0.05 or not 0 < args.motion_frequency <= 1.0
+):
+    parser.error("motion-demo requires frames>=2, amplitude in (0,0.05] rad and frequency in (0,1] Hz")
 args.enable_cameras = True
 from env.camera_manager.capture.render_sync import add_zero_delay_kit_args
 
@@ -53,7 +62,7 @@ try:
     from env.observation_manager.obs_manager import ObsManager
     from task.RoboDojo.task_registry import load_task_class
     from utils.load_file import load_yaml
-    from utils.multimodal import MultimodalWriter
+    from utils.multimodal import MultimodalWriter, json_value
     from utils.task_layout import load_task_layout, verify_task_scene
 
     eval_cfg = load_yaml(str(ROOT / "env_cfg" / (args.env_cfg + ".yml")))
@@ -84,6 +93,14 @@ try:
     obs.initialize(env)
     for _ in range(args.warmup_steps):
         env.sim_step(render=False)
+    motion = None
+    motion_validation = {"enabled": False}
+    if args.motion_demo:
+        from utils.isaaclab_compat import simulation_snapshot
+        from utils.motion_demo import WristMotionDemo
+
+        motion = WristMotionDemo(env.robot_manager, args.motion_amplitude, args.motion_frequency)
+        motion_start_time, _ = simulation_snapshot(env.sim.sim)
     writer = MultimodalWriter(
         args.output,
         {
@@ -93,14 +110,20 @@ try:
             "requested_collect_frequency_hz": obs.collect_freq,
             "layout": layout_provenance,
             "scene": scene_validation,
+            "motion_demo": motion.configuration() if motion else {"enabled": False},
         },
     )
     reports = []
     for index in range(args.frames):
         # Integer stepping preserves requested simulated collection frequency.
         for _ in range(int(obs.collect_interval)):
+            if motion:
+                current_time, current_frame = simulation_snapshot(env.sim.sim)
+                motion.apply(current_time + env.dt - motion_start_time, current_frame)
             env.sim_step(render=False)
         frame = obs.get_obs()[0]
+        if motion:
+            frame["action"]["motion_demo"] = motion.sample()
         quality = {}
         for name, camera in frame["vision"].items():
             valid = np.isfinite(camera["depth_sl"]) & (camera["depth_sl"] > 0)
@@ -127,10 +150,13 @@ try:
                 for name, cam in frame["vision"].items()
             },
             "quality": quality,
+            "motion_demo": json_value(frame["action"].get("motion_demo", {"enabled": False})),
             "tactile_fingers": {side: list(fingers) for side, fingers in frame["tactile"].items()},
         }
         reports.append(report)
         print(json.dumps(report), flush=True)
+    if motion:
+        motion_validation = motion.validate_motion()
     writer.close()
     env.close()
     if args.visualize:
@@ -145,6 +171,7 @@ try:
                 "frames": reports,
                 "layout": layout_provenance,
                 "scene": scene_validation,
+                "motion_demo": motion_validation,
             },
             indent=2,
         )

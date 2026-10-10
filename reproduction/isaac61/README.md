@@ -35,6 +35,8 @@ evaluation entry `scripts/eval_policy.sh` selects this runtime; an explicit
 
 ```bash
 bash reproduction/isaac61/run.sh collect --task stack_bowls --frames 8 --visualize
+# Validate measured wrist motion while recording every modality:
+bash reproduction/isaac61/run.sh collect --task stack_bowls --motion-demo --frames 12 --visualize --output reproduction/isaac61/outputs/moving-wrists
 ```
 
 The default output is `reproduction/isaac61/outputs/multimodal-capture`. Choose
@@ -60,6 +62,11 @@ projectors off. Each capture keeps physics frozen through all render phases,
 then verifies the same physics frame/timestamp across all modalities. Wall
 acquisition times are separate metadata.
 
+`--motion-demo` commands the final arm joint on each wrist with a small sine
+motion, bounded by its soft joint limits. Saved frames include actuator targets
+and independently measured joint positions; the run fails if either wrist does
+not measurably move. The default amplitude is 0.03 radians at 0.5 Hz.
+
 TacSL uses NVIDIA's original GelSight R1.5 geometry, calibration, SDF forces
 and Taxim rendering. Its compliant pads move with each X5 finger. These force
 values are simulated penalty-model estimates. Cloth-only scenes have actual
@@ -77,6 +84,8 @@ bash reproduction/isaac61/run.sh task-smoke --task stack_bowls
 bash reproduction/isaac61/run.sh python scripts/check_structured_light_live.py
 bash reproduction/isaac61/run.sh tactile-smoke
 bash reproduction/isaac61/run.sh python scripts/check_scene_physics_live.py
+# PBD fluid and FEM cloth use separate PhysX readback configurations:
+bash reproduction/isaac61/run.sh python scripts/check_scene_physics_live.py --fluid-only --cpu-readback
 bash reproduction/isaac61/run.sh python reproduction/isaac61/smoke_planner.py
 bash reproduction/isaac61/run.sh python reproduction/isaac61/validate_migration.py --runtime-import
 bash reproduction/isaac61/run.sh python reproduction/isaac61/check_tasks.py
