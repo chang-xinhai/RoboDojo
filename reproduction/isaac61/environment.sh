@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
-# Source from bash after activating RoboDojo's Python 3.12 environment.
-ROBODOJO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Source from bash or zsh after activating RoboDojo's Python 3.12 environment.
+if [[ -n "${BASH_VERSION:-}" ]]; then
+  ROBODOJO_ENV_FILE="${BASH_SOURCE[0]}"
+elif [[ -n "${ZSH_VERSION:-}" ]]; then
+  ROBODOJO_ENV_FILE="${(%):-%x}"
+else
+  echo 'RoboDojo environment.sh requires bash or zsh.' >&2
+  return 2
+fi
+ROBODOJO_ROOT="$(cd "$(dirname "$ROBODOJO_ENV_FILE")/../.." && pwd)"
+unset ROBODOJO_ENV_FILE
 export CUDA_HOME="${ROBODOJO_CUDA_HOME:-/usr/local/cuda-12.8}"
 export CUDA_PATH="$CUDA_HOME"
 export CUDACXX="$CUDA_HOME/bin/nvcc"

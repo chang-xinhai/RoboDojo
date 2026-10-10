@@ -93,15 +93,17 @@ Run CPU geometry/configuration tests with:
 Run actual GPU motion/reset checks with:
 
 ```sh
+source reproduction/isaac61/environment.sh
 .venv-isaac61/bin/python scripts/check_scene_physics_live.py \
   --output reproduction/isaac61/outputs/scene-cloth
 .venv-isaac61/bin/python scripts/check_scene_physics_live.py \
-  --fluid-only --cpu-readback --output reproduction/isaac61/outputs/scene-fluid
+  --fluid-only --cpu-readback --output reproduction/isaac61/outputs/scene-fluid-61
 .venv-isaac61/bin/python scripts/check_scene_physics_live.py \
-  --gravity-scale 2 --output reproduction/isaac61/outputs/scene-gravity2
+  --gravity-scale 2 --output reproduction/isaac61/outputs/scene-gravity2-61
 .venv-isaac61/bin/python scripts/check_scene_physics_live.py \
   --garment-asset Assets/Object/RoboDojo/Garment/Top_Long/00001/object.usdz \
-  --output reproduction/isaac61/outputs/scene-garment-00001
+  --output reproduction/isaac61/outputs/scene-garment-00001-61
+.venv-isaac61/bin/python scripts/build_physics_gallery.py
 ```
 
 The live checks require GPU dynamics. They check actual cloth motion, physical
@@ -111,7 +113,16 @@ fluid motion/reset. They export the stage and record the measured particle/nodal
 positions. Reports identify the actual package and PhysX extension versions.
 A passing CPU test alone does not establish runtime physics validity.
 
-Verified against the installed `omni.physx-110.1.13` implementation of
+Three native scene-object GPU runs passed on the installed **Isaac Sim 6.1.0.0 /
+OmniPhysX 110.3.2**. The gravity-2 plane and actual Top_Long/00001 garment passed
+nodal motion, rigid ground contact, zero-velocity reset, next-step acceleration,
+and projected live nodes versus actual reset RGB checks. The fluid passed actual
+particle motion, reset, and reset RGB changes with GPU dynamics and host readback.
+These native checks do not replace the separate full Isaac Lab TaskEnv/robot
+checks. The gallery builder validates the actual report versions before creating
+`reproduction/isaac61/outputs/physics-gallery/index.html` and `physics-captures.png`.
+
+Verified against the installed `omni.physx-110.3.2` implementation of
 `deformableUtils.set_physics_surface_deformable_body`,
 `deformableUtils.add_surface_deformable_material`, `particleUtils`, and official
 Isaac Lab 3 EA `isaaclab_physx` deformable tensor-view code.
