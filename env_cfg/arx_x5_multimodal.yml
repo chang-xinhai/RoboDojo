@@ -1,0 +1,24 @@
+config_name: arx_x5_multimodal
+config:
+  sim: sim_config_multimodal
+  scene: default
+  robot: dual_x5
+  camera: camera_config_multimodal
+observation:
+  collect_freq: 25
+  multimodal: true
+  robot:
+    joint_states: true
+    world_ee_state: true
+  vision:
+    approximate_depth: false
+    depth: true
+    intrinsic_matrix: true
+    extrinsic_matrix: true
+    shape: true
+
+tactile:
+  enabled: true
+  array_size: [12, 16]
+  margin: 0.003
+  normal_stiffness: 1500.0
