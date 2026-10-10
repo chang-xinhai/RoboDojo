@@ -15,4 +15,4 @@ export CMAKE_BUILD_PARALLEL_LEVEL=8
 export PYTHONNOUSERSITE=1
 export TERM=xterm-256color
 export OMNI_KIT_ACCEPT_EULA=YES
-export ROBODOJO_KIT_ARGS="--/app/tokens/data=$ROBODOJO_ROOT/.cache/isaac61/data --/app/tokens/cache=$ROBODOJO_ROOT/.cache/isaac61/cache --/app/tokens/logs=$ROBODOJO_ROOT/.cache/isaac61/logs --/app/extensions/registryEnabled=false --/exts/isaacsim.sensors.camera/renderer=RayTracedLighting"
+export ROBODOJO_KIT_ARGS="--/app/tokens/data=$ROBODOJO_ROOT/.cache/isaac61/data --/app/tokens/cache=$ROBODOJO_ROOT/.cache/isaac61/cache --/app/tokens/logs=$ROBODOJO_ROOT/.cache/isaac61/logs --/app/extensions/registryEnabled=false"

@@ -3,6 +3,13 @@ set -euo pipefail
 
 # Ensure project root is on PYTHONPATH so first-party imports like `env`, `task`, and `utils` work.
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "${ROBODOJO_RUNTIME:-isaac61}" == "isaac61" ]]; then
+  ROBODOJO_VENV="${ROBODOJO_ISAAC61_ENV:-$PROJECT_ROOT/.venv-isaac61}"
+  [[ -x "$ROBODOJO_VENV/bin/python" ]] || { echo 'Run scripts/install.sh to install the Isaac Sim 6.1 runtime.' >&2; exit 1; }
+  export VIRTUAL_ENV="$ROBODOJO_VENV"
+  export PATH="$ROBODOJO_VENV/bin:$PATH"
+  source "$PROJECT_ROOT/reproduction/isaac61/environment.sh"
+fi
 export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/XPolicyLab:${PYTHONPATH:-}"
 echo "[INFO] PYTHONPATH=${PYTHONPATH}"
 
@@ -125,7 +132,7 @@ KIT_ENABLE_EXTS=(
   "isaacsim.sensors.camera"
 )
 
-KIT_ARGS=""
+KIT_ARGS="${ROBODOJO_KIT_ARGS:-}"
 for ext in "${KIT_ENABLE_EXTS[@]}"; do
   KIT_ARGS+=" --enable ${ext}"
 done

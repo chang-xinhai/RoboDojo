@@ -10,6 +10,12 @@
 
 https://private-user-images.githubusercontent.com/88101805/619409345-cc074c5d-4567-4418-8a29-1385aaba9d5b.mp4
 
+## Isaac Sim 6.1 / Isaac Lab 3.0 Early Access
+
+This branch pins Isaac Sim **6.1.0.0** and the official Isaac Lab **v3.0.0-EA** source. The default installer and evaluation entry use the isolated `.venv-isaac61` environment. See [setup, multimodal capture and acceptance tests](reproduction/isaac61/README.md).
+
+The `arx_x5_multimodal` configuration captures RGB, renderer depth, projected stereo IR and reconstructed structured-light depth at the head and both wrists, plus official TacSL images and contact fields on both fingers of each gripper. Records include calibration, sensor provenance and one shared physics timestamp.
+
 ## News
 
 - **September 16–17, 2026**
@@ -121,7 +127,7 @@ Released under the [MIT License](LICENSE).
 
 <p align="center">
   <img alt="Python 3.11" src="https://img.shields.io/badge/Python-3.11-475569?style=flat-square&logo=python&logoColor=white&labelColor=64748b" height="22"/>&nbsp;
-  <img alt="Isaac Sim 5.1" src="https://img.shields.io/badge/Isaac_Sim-5.1-475569?style=flat-square&logo=nvidia&logoColor=76B900&labelColor=64748b" height="22"/>&nbsp;
-  <img alt="Isaac Lab 2.3" src="https://img.shields.io/badge/Isaac_Lab-2.3-475569?style=flat-square&logo=nvidia&logoColor=76B900&labelColor=64748b" height="22"/>&nbsp;
+  <img alt="Isaac Sim 6.1" src="https://img.shields.io/badge/Isaac_Sim-6.1-475569?style=flat-square&logo=nvidia&logoColor=76B900&labelColor=64748b" height="22"/>&nbsp;
+  <img alt="Isaac Lab 3.0 Early Access" src="https://img.shields.io/badge/Isaac_Lab-3.0_EA-475569?style=flat-square&logo=nvidia&logoColor=76B900&labelColor=64748b" height="22"/>&nbsp;
   <img alt="License MIT" src="https://img.shields.io/badge/License-MIT-475569?style=flat-square&labelColor=64748b" height="22"/>
 </p>

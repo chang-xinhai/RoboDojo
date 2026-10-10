@@ -10,15 +10,23 @@ export PYTHONPATH="$ROBODOJO_ROOT:$ROBODOJO_ROOT/XPolicyLab${PYTHONPATH:+:$PYTHO
 case "${1:-}" in
   smoke)
     shift
+    rm -f reproduction/isaac61/runtime-smoke.json
     python reproduction/isaac61/smoke_runtime.py --viz none --kit_args "$ROBODOJO_KIT_ARGS" "$@"
+    python -c 'import json; assert json.load(open("reproduction/isaac61/runtime-smoke.json"))["status"] == "passed"'
     ;;
   task-smoke)
     shift
-    python reproduction/smoke_task.py --viz none --kit_args "$ROBODOJO_KIT_ARGS" "$@"
+    rm -f reproduction/isaac61/task-smoke.json
+    python reproduction/smoke_task.py --output reproduction/isaac61/task-smoke.json --viz none --kit_args "$ROBODOJO_KIT_ARGS" "$@"
+    python -c 'import json; assert json.load(open("reproduction/isaac61/task-smoke.json"))["status"] == "passed"'
     ;;
   collect)
     shift
     python reproduction/collect_multimodal.py --viz none --kit_args "$ROBODOJO_KIT_ARGS" "$@"
+    ;;
+  tactile-smoke)
+    shift
+    python reproduction/isaac61/smoke_tactile_contact.py --viz none --kit_args "$ROBODOJO_KIT_ARGS" "$@"
     ;;
   visualize)
     shift
@@ -37,7 +45,7 @@ case "${1:-}" in
     python "$@"
     ;;
   *)
-    echo 'Usage: bash reproduction/isaac61/run.sh {smoke|task-smoke|collect|visualize|test|client|python} [args...]' >&2
+    echo 'Usage: bash reproduction/isaac61/run.sh {smoke|task-smoke|tactile-smoke|collect|visualize|test|client|python} [args...]' >&2
     exit 2
     ;;
 esac

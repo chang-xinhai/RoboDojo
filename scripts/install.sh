@@ -4,6 +4,11 @@ export PIP_USER=0
 export PYTHONNOUSERSITE=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CURRENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# The migrated checkout installs the locked Python 3.12 / Sim 6.1 runtime.
+# Keep the historical installer available for the original 5.1 revision.
+if [[ "${ROBODOJO_RUNTIME:-isaac61}" == "isaac61" ]]; then
+  exec bash "$CURRENT_DIR/reproduction/isaac61/setup.sh" "$@"
+fi
 ISAACLAB_RL_FRAMEWORK="${ISAACLAB_RL_FRAMEWORK:-none}"
 # ── Helpers ────────────────────────────────────────────────────────────────────
 info()  { echo -e "\e[1;32m>>> $*\e[0m"; }
@@ -121,11 +126,11 @@ setup_base_deps() {
 setup_submodules() {
   cd "$CURRENT_DIR" || exit 1
   local subs=(third_party/IsaacLab third_party/curobo XPolicyLab)
-  info "[3/7] Syncing and updating submodules from remote..."
+  info "[3/7] Syncing and restoring pinned submodules..."
   git submodule sync "${subs[@]}"
   for sub in "${subs[@]}"; do
-    info "    Updating ${sub} from remote..."
-    git submodule update --init --remote --progress "$sub" || {
+    info "    Restoring ${sub} at the parent repository's recorded commit..."
+    git submodule update --init --progress "$sub" || {
       [ "$sub" = "XPolicyLab" ] && error "Failed to clone XPolicyLab. Ensure HTTPS auth (e.g. gh auth login)."
       error "Failed to update $sub."
     }

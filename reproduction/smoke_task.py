@@ -57,7 +57,9 @@ try:
     data = obs.get_obs()
     shapes = {}
     for name, camera in data[0]["vision"].items():
-        rgb = camera["rgb"]
+        # The policy observation API retains its historical RGB alias.
+        rgb = camera.get("rgb", camera.get("color"))
+        assert rgb is not None, (name, list(camera))
         assert rgb.dtype == np.uint8 and rgb.ndim == 3 and rgb.shape[-1] == 3, (name, rgb.shape, rgb.dtype)
         assert "depth" in camera, (name, camera.keys())
         depth = camera["depth"]

@@ -161,7 +161,7 @@ class StructuredLightCapture:
         if not np.isfinite(self.baseline) or self.baseline <= 0:
             raise ValueError("structured_light.baseline_m must be positive and finite")
         asset_dir = config.get(
-            "asset_cache", str(Path(__file__).resolve().parents[2] / "../outputs/structured_light/assets")
+            "asset_cache", str(Path(__file__).resolve().parents[2] / ".cache/isaac61/structured_light/assets")
         )
         pattern, lut = generate_projector_assets(asset_dir, seed=int(config.get("pattern_seed", 7)))
         self.pattern, self.direction_texture = str(pattern), str(lut)

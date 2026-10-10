@@ -1,0 +1,7 @@
+{
+  "repo_id": "RoboDojo-Benchmark/RoboDojo",
+  "revision": "35efbc7dedfdbeeb6e95fb749bd885d73d483e41",
+  "allow_patterns": [
+    "Assets/**"
+  ]
+}
