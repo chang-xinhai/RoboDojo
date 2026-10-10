@@ -3,6 +3,7 @@
 import argparse
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 
 import numpy as np
@@ -11,6 +12,7 @@ from utils.isaaclab_compat import (
     add_app_launcher_args,
     as_torch,
     pose_xyzw_to_wxyz,
+    simulation_snapshot,
     wxyz_to_xyzw,
     xyzw_to_wxyz,
 )
@@ -68,6 +70,35 @@ class QuaternionContractTests(unittest.TestCase):
 
 
 class ArrayAndLaunchContractTests(unittest.TestCase):
+    def test_snapshot_uses_physics_steps_without_advancing_context(self):
+        class Context:
+            frame = 0
+
+            def get_physics_step_count(self):
+                return self.frame
+
+            def get_physics_dt(self):
+                return 0.004
+
+            def get_simulation_time(self):
+                # Early Access PhysX currently leaves this upstream clock at 0.
+                return 0.0
+
+            def step(self):
+                raise AssertionError("Reading an acquisition clock must not advance physics")
+
+        ctx = Context()
+        self.assertEqual(simulation_snapshot(ctx), (0.0, 0))
+        ctx.frame = 250
+        self.assertEqual(simulation_snapshot(ctx), (1.0, 250))
+        ctx.frame = 260
+        self.assertEqual(simulation_snapshot(ctx), (1.04, 260))
+        self.assertEqual(ctx.frame, 260)
+
+    def test_snapshot_legacy_seconds_are_not_inferred_from_frame(self):
+        ctx = SimpleNamespace(current_time=7.5, current_time_step_index=19)
+        self.assertEqual(simulation_snapshot(ctx), (7.5, 19))
+
     def test_array_passthrough_does_not_copy(self):
         source = np.arange(6).reshape(2, 3)
         self.assertIs(as_torch(source), source)

@@ -57,13 +57,25 @@ try:
     data = obs.get_obs()
     shapes = {}
     for name, camera in data[0]["vision"].items():
+        rgb = camera["rgb"]
+        assert rgb.dtype == np.uint8 and rgb.ndim == 3 and rgb.shape[-1] == 3, (name, rgb.shape, rgb.dtype)
         assert "depth" in camera, (name, camera.keys())
         depth = camera["depth"]
+        assert depth.shape == rgb.shape[:2], (name, depth.shape, rgb.shape)
         assert np.any(np.isfinite(depth) & (depth > 0)), name
         shapes[name] = {key: list(value.shape) for key, value in camera.items() if hasattr(value, "shape")}
-    assert shapes, "No camera observations"
+    assert set(shapes) == {"cam_head", "cam_left_wrist", "cam_right_wrist"}, shapes
+    import importlib.metadata as metadata
+    import subprocess
+
     result = {
         "status": "passed",
+        "real_runtime": True,
+        "physics_steps": 10,
+        "packages": {name: metadata.version(name) for name in ("isaacsim", "isaaclab", "torch", "warp-lang")},
+        "isaaclab_source_commit": subprocess.check_output(
+            ["git", "-C", str(ROOT / "third_party/IsaacLab3"), "rev-parse", "HEAD"], text=True
+        ).strip(),
         "task": args.task,
         "env_cfg": args.env_cfg,
         "num_envs": 1,

@@ -44,7 +44,7 @@ try:
         prim_path="/World/Camera",
         width=128,
         height=128,
-        data_types=["rgb", "depth/distance_to_image_plane"],
+        data_types=["rgb", "distance_to_image_plane"],
         spawn=sim_utils.PinholeCameraCfg(clipping_range=(0.01, 10.0)),
         renderer_cfg=IsaacRtxRendererCfg(),
     )
@@ -57,7 +57,7 @@ try:
         sim.step()
         camera.update(sim.get_physics_dt(), force_recompute=True)
     rgb = as_torch(camera.data.output["rgb"])
-    depth = as_torch(camera.data.output["depth/distance_to_image_plane"])
+    depth = as_torch(camera.data.output["distance_to_image_plane"])
     finite = torch.isfinite(depth) & (depth > 0)
     assert tuple(rgb.shape[:3]) == (1, 128, 128), rgb.shape
     assert finite.any().item(), "No valid RTX depth"
