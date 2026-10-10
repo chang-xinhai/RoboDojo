@@ -34,6 +34,7 @@ class ObsManager:
             seeds_per_env=seeds_per_env,
         )
         self.robot_cfg = obs_config.get("robot", {})
+        self.multimodal = bool(obs_config.get("multimodal", False))
         self.collect_freq = self.obs_config.get("collect_freq", 0)
         # Frames the SDG dispatcher must deliver after the physics step before
         # images are read. One is exact with the zero-delay Kit settings that
@@ -68,6 +69,12 @@ class ObsManager:
         else:
             self.camera_manager = None
 
+        self.tactile_manager = getattr(env, "tactile_manager", None)
+        if self.multimodal:
+            if not self.camera_manager or not getattr(self.camera_manager, "structured_light_enabled", False):
+                raise RuntimeError("Multimodal capture requires enabled structured-light cameras")
+            if self.tactile_manager is None or not getattr(self.tactile_manager, "enabled", False):
+                raise RuntimeError("Multimodal capture requires the actual Isaac Lab TacSL tactile manager")
         self.initialize_instruction()
 
     def initialize_instruction(self):
@@ -106,7 +113,9 @@ class ObsManager:
                 "frequency": self.collect_freq,
             }
             obs[env_idx]["instruction"] = self.instruction[env_idx]
-        if self.camera_manager is not None and self.capture_manager is not None:
+        if self.multimodal:
+            self._capture_multimodal(obs, env_idx_list)
+        elif self.camera_manager is not None and self.capture_manager is not None:
             try:
                 data = self.capture_manager.step(env_ids=env_idx_list)
                 for ith in range(self.camera_manager.num_cams):
@@ -217,4 +226,49 @@ class ObsManager:
                 print(stack_trace)
                 print("[get_obs] Robot observation capture failed.")
                 raise e
+        if self.multimodal:
+            from utils.multimodal import validate_multimodal
+
+            for item in obs.values():
+                validate_multimodal(item)
         return obs
+
+    def _capture_multimodal(self, obs, env_idx_list):
+        """Hold physics fixed while sequential render phases read every sensor.
+
+        The shared envelope clock is simulation time, never wall-clock time.
+        CameraManager and TacSL also provide independent acquisition clocks.
+        """
+        from utils.isaaclab_compat import simulation_snapshot
+        from utils.multimodal import SCHEMA_VERSION, numpy_copy
+
+        sim_context = self.env.sim.sim
+        start_time, start_frame = simulation_snapshot(sim_context)
+        timestamp_ns = round(start_time * 1e9)
+        for env_idx in env_idx_list:
+            cameras = self.camera_manager.capture_multimodal(env_id=env_idx)
+            obs[env_idx]["vision"] = {name.removeprefix("cam_"): data for name, data in cameras.items()}
+        tactile = self.tactile_manager.get_observations()
+        for env_idx in env_idx_list:
+            obs[env_idx]["tactile"] = {}
+            for side, fingers in tactile.items():
+                obs[env_idx]["tactile"][side] = {}
+                for finger, data in fingers.items():
+                    sample = {}
+                    for field, value in data.items():
+                        if hasattr(value, "shape"):
+                            sample[field] = numpy_copy(value[env_idx])
+                        else:
+                            sample[field] = deepcopy(value)
+                    obs[env_idx]["tactile"][side][finger] = sample
+            obs[env_idx]["sync"] = {
+                "schema": SCHEMA_VERSION,
+                "physics_frame": start_frame,
+                "timestamp_ns": timestamp_ns,
+                "simulation_time_s": start_time,
+                "env_id": int(env_idx),
+                "physics_held_fixed": True,
+            }
+            obs[env_idx]["data_format_version"] = SCHEMA_VERSION
+        if simulation_snapshot(sim_context) != (start_time, start_frame):
+            raise RuntimeError("Physics advanced during multimodal capture; refusing an unsynchronized observation")
