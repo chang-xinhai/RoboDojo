@@ -20,6 +20,13 @@ ignore/
 .venv*/
 reproduction/isaac61/*.log
 reproduction/isaac61/outputs/
+reproduction/asset-verification-*.json
+reproduction/isaac61/runtime-smoke.json
+reproduction/isaac61/runtime-smoke.npz
+reproduction/isaac61/task-smoke.json
+reproduction/isaac61/planner-smoke.json
+reproduction/isaac61/planner-smoke.npz
+reproduction/isaac61/requirements-resolved.txt
 
 # Editor / agent scratch (never committed)
 .cursor/
