@@ -165,6 +165,7 @@ class BaseEnv(gym.Env):
         except Exception:
             traceback.print_exc()
             raise
+        self.stage = self.sim.sim.stage
         self.env_spacing = config.scene.env_spacing
         self.sim.env_spacing = self.env_spacing
         self.env_origins = self.sim.scene.env_origins
@@ -224,6 +225,9 @@ class BaseEnv(gym.Env):
             sim.sim.set_setting("/physics/updateToUsd", True)
             sim.sim.set_setting("/physics/updateParticlesToUsd", True)
             sim.sim.set_setting("/isaaclab/robodojo/particle_readback", True)
+            from utils.particle_readback_bridge import install_particle_readback_bridge
+
+            self._particle_readback_handle = install_particle_readback_bridge(sim.sim.physics_manager)
             print("[RoboDojo] PBD fluid pipeline: GPU dynamics with particle readback enabled.")
 
     def close(self):
@@ -240,14 +244,12 @@ class BaseEnv(gym.Env):
             self.sim.close()
             self.sim = None
 
-        try:
-            import omni.usd
+        # Lab 3 already closes the attached USD stage after detaching PhysX.
+        # Reset its thread-local authoring stage with the pure USD API, not
+        # UsdContext.close_stage/new_stage (which races Kit's close operation).
+        from isaaclab.sim.utils.stage import create_new_stage
 
-            ctx = omni.usd.get_context()
-            ctx.close_stage()
-            ctx.new_stage()
-        except Exception as e:
-            print("[restart] close_stage failed:", e)
+        self.stage = create_new_stage()
 
     def update_seed(self, seed: Any | None = None):
         global_seed, _ = self._process_seed_input(seed)

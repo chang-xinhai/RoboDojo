@@ -54,6 +54,10 @@ def install_legacy_prim_adapter():
                 if cls._torch_view is None:
                     raise RuntimeError("Unable to create the legacy prim tensor view for the current PhysX scene")
                 cls._torch_view.set_subspace_roots("/")
+                if type(official_view).__name__ == "ReadbackTensorView":
+                    from utils.particle_readback_bridge import ReadbackTensorView
+
+                    cls._torch_view = ReadbackTensorView(cls._torch_view, PhysxManager.get_physics_sim_device())
                 cls._view_key = key
             return cls._torch_view
 
