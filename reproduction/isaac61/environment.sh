@@ -24,6 +24,9 @@ export CMAKE_BUILD_PARALLEL_LEVEL=8
 export WARP_CACHE_PATH="$ROBODOJO_ROOT/.cache/isaac61/warp"
 export TORCH_EXTENSIONS_DIR="$ROBODOJO_ROOT/.cache/isaac61/torch-extensions"
 export CUDA_CACHE_PATH="$ROBODOJO_ROOT/.cache/isaac61/cuda"
+# OmniClient resolves remote MDL assets under the XDG cache. Keep this runtime
+# independent of old root-owned files in the workstation's shared client cache.
+export XDG_CACHE_HOME="$ROBODOJO_ROOT/.cache/isaac61/xdg"
 export PYTHONNOUSERSITE=1
 export TERM=xterm-256color
 export OMNI_KIT_ACCEPT_EULA=YES
