@@ -21,6 +21,8 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("outputs/validation/structured_light"))
     parser.add_argument("--intensity", type=float, default=1500)
     parser.add_argument("--saturation-radiance", type=float, default=5500)
+    parser.add_argument("--distance", type=float, default=1.0)
+    parser.add_argument("--roll-deg", type=float, default=0.0)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root))
@@ -78,7 +80,12 @@ def main():
         names = ["cam_head", "cam_left_wrist", "cam_right_wrist"]
         for name, x in zip(names, (0.0, -0.2, 0.2)):
             camera = Camera(f"/World/{name}", resolution=(320, 240))
-            camera.set_local_pose(np.array([x, 0, 1.0]), np.array([1.0, 0.0, 0.0, 0.0]), camera_axes="usd")
+            half_angle = np.deg2rad(args.roll_deg) / 2
+            camera.set_local_pose(
+                np.array([x, 0, args.distance]),
+                np.array([np.cos(half_angle), 0.0, 0.0, np.sin(half_angle)]),
+                camera_axes="usd",
+            )
             camera.set_focal_length(10.0)
             camera.set_horizontal_aperture(20.0, False)
             camera.set_vertical_aperture(15.0, False)
@@ -128,6 +135,8 @@ def main():
             config=config,
             sensors={},
             physics_timestamp_ns=round(sim.current_time * 1e9),
+            reference_distance_m=args.distance,
+            reference_roll_deg=args.roll_deg,
         )
         montage = Image.new("RGB", (320 * 4, 240 * 3 + 24))
         draw = ImageDraw.Draw(montage)
@@ -149,6 +158,7 @@ def main():
                 stereo_depth_median_m=median,
                 depth_gt_median_m=float(np.nanmedian(frame["depth_gt"])),
                 timestamp_ns=frame["timestamp_ns"],
+                calibration=frame["calibration"],
             )
             report["sensors"][name] = quality
             if (
@@ -156,8 +166,13 @@ def main():
                 or quality["ir_std"] < 1
                 or quality["stereo_valid_fraction"] < 0.1
                 or median is None
-                or abs(median - 1.0) > 0.15
+                or abs(median - args.distance) > 0.15
             ):
+                failed.append(name)
+            expected_optical = extrinsics(row, 0) @ np.diag([1.0, -1.0, -1.0, 1.0])
+            optical = np.asarray(frame["calibration"]["T_world_from_optical"]["rgb"])
+            quality["render_pose_max_abs_error"] = float(np.max(np.abs(optical - expected_optical)))
+            if quality["render_pose_max_abs_error"] > 1e-5:
                 failed.append(name)
             depth_color = np.zeros((*depth.shape, 3), np.uint8)
             depth_color[..., 1] = np.where(finite, np.clip(1 - np.abs(depth - 1), 0, 1) * 255, 0).astype(np.uint8)

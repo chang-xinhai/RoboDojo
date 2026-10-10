@@ -34,6 +34,36 @@ def stereo_intrinsics(resolution, focal_length, horizontal_aperture, vertical_ap
     )
 
 
+def render_camera_model(params, shape):
+    """Read optical calibration from the exact delivered RTX render product."""
+
+    def vector(key, size):
+        value = np.asarray(params[key], dtype=np.float64).reshape(-1)
+        if value.size != size or not np.isfinite(value).all():
+            raise ValueError(f"CameraParams {key} must contain {size} finite values")
+        return value
+
+    view = vector("cameraViewTransform", 16).reshape(4, 4)
+    projection = vector("cameraProjection", 16).reshape(4, 4)
+    focal = vector("cameraFocalLength", 1)[0]
+    aperture = vector("cameraAperture", 2)
+    offsets = vector("cameraApertureOffset", 2)
+    resolution = vector("renderProductResolution", 2)
+    if not np.allclose(resolution, shape[::-1], atol=0, rtol=0):
+        raise ValueError("CameraParams resolution differs from delivered image")
+    if focal <= 0 or (aperture <= 0).any():
+        raise ValueError("CameraParams focal length and aperture must be positive")
+    if not np.isclose(vector("metersPerSceneUnit", 1)[0], 1.0, atol=1e-9, rtol=0):
+        raise ValueError("Structured stereo requires metric stage units")
+    k = stereo_intrinsics(resolution, focal, *aperture)
+    k[:2, 2] += resolution * offsets / aperture
+    world = np.linalg.inv(view).T
+    if not np.allclose(world[3], [0, 0, 0, 1], atol=1e-6, rtol=0):
+        raise ValueError("CameraParams view transform is not affine")
+    optical = world @ np.diag([1.0, -1.0, -1.0, 1.0])
+    return dict(K=k, T_world_from_optical=optical, view_row_major=view, projection_row_major=projection)
+
+
 def active_ir(on, off, saturation_radiance):
     """Expose projector-only radiance using a shared fixed sensor gain."""
     if not np.isfinite(saturation_radiance) or saturation_radiance <= 0:
@@ -151,6 +181,8 @@ class StructuredLightCapture:
                 rgb_sensor = CameraSensor(
                     rgb, resolution=(height, width), annotators=["rgb", "distance_to_image_plane"]
                 )
+                params = {"rgb": rep.AnnotatorRegistry.get_annotator("CameraParams")}
+                params["rgb"].attach([str(rgb_sensor.render_product.GetPath())])
                 # CameraSensor enforces square pixels; read the resulting
                 # authored aperture after its constructor, not before.
                 k = stereo_intrinsics(
@@ -170,6 +202,8 @@ class StructuredLightCapture:
                     eyes[eye] = sensor
                     hdr[eye] = rep.AnnotatorRegistry.get_annotator("HdrColor", device="cpu", do_array_copy=True)
                     hdr[eye].attach([str(sensor.render_product.GetPath())])
+                    params[eye] = rep.AnnotatorRegistry.get_annotator("CameraParams")
+                    params[eye].attach([str(sensor.render_product.GetPath())])
                 projector = UsdLux.RectLight.Define(self.stage, f"{rgb_path}/projector")
                 prim = projector.GetPrim()
                 UsdLux.ShapingAPI.Apply(prim)
@@ -193,6 +227,7 @@ class StructuredLightCapture:
                     K=k,
                     shape=(height, width),
                     rgb_path=rgb_path,
+                    params=params,
                 )
 
     def set_projectors(self, enabled, *, env_id=None, camera_name=None):
@@ -265,22 +300,26 @@ class StructuredLightCapture:
                     for eye in on
                 }
                 phase_on_ns = time.time_ns()
+                models = {view: render_camera_model(a.get_data(), shape) for view, a in rig["params"].items()}
+                k = models["ir_left"]["K"]
+                relative = (
+                    np.linalg.inv(models["ir_left"]["T_world_from_optical"])
+                    @ models["ir_right"]["T_world_from_optical"]
+                )
+                expected = np.eye(4)
+                expected[0, 3] = self.baseline
+                if not np.allclose(relative, expected, atol=1e-5, rtol=0) or not np.allclose(
+                    k, models["ir_right"]["K"], atol=1e-3, rtol=0
+                ):
+                    raise RuntimeError("Rendered stereo pair is not parallel with the configured horizontal baseline")
                 depth_sl = reconstruct_stereo(
                     ir["ir_left"],
                     ir["ir_right"],
-                    rig["K"][0, 0],
+                    k[0, 0],
                     self.baseline,
                     max_disparity=int(self.config.get("max_disparity", 128)),
                 )
-                root = self.manager.get_camera_extrinsics(rig["cam_id"], env_id)
-                # CameraManager reports USD camera axes (+X right,+Y up,-Z
-                # forward); saved optical axes are +X right,+Y down,+Z forward.
-                optical_flip = np.diag([1.0, -1.0, -1.0, 1.0])
-                transforms = {"rgb": root @ optical_flip}
-                for eye, offset in (("ir_left", -self.baseline / 2), ("ir_right", self.baseline / 2)):
-                    local = np.eye(4)
-                    local[0, 3] = offset
-                    transforms[eye] = root @ local @ optical_flip
+                transforms = {view: model["T_world_from_optical"] for view, model in models.items()}
                 result[name] = dict(
                     rgb=rgb,
                     depth_gt=gt,
@@ -288,7 +327,15 @@ class StructuredLightCapture:
                     **ir,
                     timestamp_ns=timestamp_ns,
                     calibration=dict(
-                        K=rig["K"].tolist(),
+                        K=k.tolist(),
+                        K_by_view={view: model["K"].tolist() for view, model in models.items()},
+                        projection_authority="Replicator CameraParams from each exact RGB/IR render product",
+                        camera_view_row_major={
+                            view: model["view_row_major"].tolist() for view, model in models.items()
+                        },
+                        camera_projection_row_major={
+                            view: model["projection_row_major"].tolist() for view, model in models.items()
+                        },
                         baseline_m=self.baseline,
                         T_world_from_optical={k: v.tolist() for k, v in transforms.items()},
                         depth_gt_frame="rgb",
@@ -324,6 +371,8 @@ class StructuredLightCapture:
         for rigs in self.rigs.values():
             for rig in rigs.values():
                 for annotator in rig["hdr"].values():
+                    annotator.detach()
+                for annotator in rig["params"].values():
                     annotator.detach()
                 for sensor in (rig["rgb"], *rig["eyes"].values()):
                     sensor.detach_annotators(sensor.annotators)

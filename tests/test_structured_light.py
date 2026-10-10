@@ -41,6 +41,37 @@ class StructuredLightTests(unittest.TestCase):
         k = sl.stereo_intrinsics((640, 480), 10, 20, 15)
         np.testing.assert_allclose(k, [[320, 0, 320], [0, 320, 240], [0, 0, 1]])
 
+    def test_render_view_recovers_moving_optical_pose(self):
+        world = np.array([[0.0, 0.0, 1.0, 0.3], [0.0, 1.0, 0.0, -0.2], [-1.0, 0.0, 0.0, 1.4], [0.0, 0.0, 0.0, 1.0]])
+        params = dict(
+            cameraViewTransform=np.linalg.inv(world).T.reshape(-1),
+            cameraProjection=np.eye(4).reshape(-1),
+            cameraFocalLength=10.0,
+            cameraAperture=[20.0, 15.0],
+            cameraApertureOffset=[0.0, 0.0],
+            renderProductResolution=[640, 480],
+            metersPerSceneUnit=1.0,
+        )
+        model = sl.render_camera_model(params, (480, 640))
+        np.testing.assert_allclose(model["T_world_from_optical"], world @ np.diag([1.0, -1.0, -1.0, 1.0]))
+        np.testing.assert_allclose(model["K"], [[320, 0, 320], [0, 320, 240], [0, 0, 1]])
+        params["metersPerSceneUnit"] = 0.01
+        with self.assertRaisesRegex(ValueError, "metric"):
+            sl.render_camera_model(params, (480, 640))
+
+    def test_render_calibration_rejects_wrong_resolution(self):
+        params = dict(
+            cameraViewTransform=np.eye(4).reshape(-1),
+            cameraProjection=np.eye(4).reshape(-1),
+            cameraFocalLength=10.0,
+            cameraAperture=[20.0, 15.0],
+            cameraApertureOffset=[0.0, 0.0],
+            renderProductResolution=[640, 480],
+            metersPerSceneUnit=1.0,
+        )
+        with self.assertRaisesRegex(ValueError, "resolution"):
+            sl.render_camera_model(params, (240, 320))
+
     def test_known_disparity_recovers_metric_depth(self):
         rng = np.random.default_rng(4)
         left = rng.integers(0, 256, size=(100, 320), dtype=np.uint8)

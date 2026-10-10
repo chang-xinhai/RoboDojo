@@ -7,6 +7,10 @@ camera, parallel IR views separated by 50 mm, and an RTX projector. The optional
 `structured_light.baseline_m` sets the virtual baseline, not a factory-calibrated
 Gemini baseline. Intrinsics are read from the actual camera prim after Isaac Sim
 enforces square pixels.
+Saved world poses, view matrices, projections, and per-view intrinsics come
+from `CameraParams` on each exact render product. This follows rendered Fabric
+transforms when wrist cameras move. Capture rejects a stereo pair whose actual
+view transforms do not preserve the configured parallel horizontal baseline.
 
 `CameraManager.capture_multimodal(env_id)` returns `cam_head`, `cam_left_wrist`,
 and `cam_right_wrist` packets. RGB is `uint8 HWC`; IR left/right are `uint8 HW`;
