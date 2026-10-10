@@ -31,6 +31,12 @@ The saved provenance explicitly identifies IR as an active projector radiance
 proxy. The rig is a configurable virtual sensor and has no factory calibration
 claim. It does not substitute a grayscale RGB image for either stereo view.
 The dot layout and radiance scale should be validated for each task scene.
+Use `render.antialiasing_mode: Off` in the multimodal environment profile:
+temporal AA and DLSS blend the projector phases and suppress the dot pattern.
+The initial plane validation on Isaac Sim 6.0.1 used projector intensity 1500
+and saturation radiance 5500, yielding approximately 80% valid stereo depth
+at the known one-meter range for all three rigs. This is a geometry/projection
+debugging result; Isaac Sim 6.1 and moving robot capture require their own runs.
 
 Capture freezes physics while rendering the ambient and active phases. Each
 projector is enabled separately to prevent interference between head and wrist

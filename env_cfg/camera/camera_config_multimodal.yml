@@ -4,9 +4,9 @@ structured_light:
   enabled: true
   baseline_m: 0.05
   pattern_seed: 7
-  projector_intensity: 150000.0
-  saturation_radiance: 1.0
-  settle_render_passes: 3
+  projector_intensity: 1500.0
+  saturation_radiance: 5500.0
+  settle_render_passes: 5
   max_render_passes: 32
   max_disparity: 128
 annotator:

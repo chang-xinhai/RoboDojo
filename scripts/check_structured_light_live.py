@@ -8,16 +8,18 @@ RTX projector and triangulation independently from task/robot dependencies.
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 from pathlib import Path
 import sys
+import traceback
 from types import SimpleNamespace
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=Path("outputs/validation/structured_light"))
-    parser.add_argument("--intensity", type=float, default=150000)
+    parser.add_argument("--intensity", type=float, default=1500)
     parser.add_argument("--saturation-radiance", type=float, default=5500)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -31,13 +33,15 @@ def main():
     app = SimulationApp(
         {
             "headless": True,
+            "fast_shutdown": True,
             "renderer": "RayTracedLighting",
-            "extra_args": zero_delay_kit_args().split(),
+            "extra_args": zero_delay_kit_args().split() + ["--/rtx/post/aa/op=0", "--/rtx-defaults/post/aa/op=0"],
             "width": 960,
             "height": 720,
         }
     )
     capture = None
+    exit_code = 0
     try:
         from isaacsim.core.utils.extensions import enable_extension
 
@@ -46,11 +50,13 @@ def main():
         from isaacsim.core.utils.stage import get_current_stage
         from isaacsim.sensors.camera import Camera
         import numpy as np
-        from PIL import Image
+        import omni.replicator.core as rep
+        from PIL import Image, ImageDraw
         from pxr import Gf, Sdf, UsdGeom, UsdLux, UsdShade
 
         from env.camera_manager.structured_light import StructuredLightCapture
 
+        rep.settings.set_render_rtx_realtime(antialiasing="Off")
         sim = SimulationContext(physics_dt=1 / 60, rendering_dt=1 / 60, stage_units_in_meters=1)
         stage = get_current_stage()
         plane = UsdGeom.Cube.Define(stage, "/World/target")
@@ -116,8 +122,19 @@ def main():
         for _ in range(30):
             sim.render()
         frames = capture.capture()
-        report = dict(config=config, sensors={}, physics_timestamp_ns=round(sim.current_time * 1e9))
-        montage = Image.new("RGB", (320 * 4, 240 * 3))
+        report = dict(
+            isaacsim_version=importlib.metadata.version("isaacsim"),
+            antialiasing="Off",
+            config=config,
+            sensors={},
+            physics_timestamp_ns=round(sim.current_time * 1e9),
+        )
+        montage = Image.new("RGB", (320 * 4, 240 * 3 + 24))
+        draw = ImageDraw.Draw(montage)
+        for col, title in enumerate(
+            ("RGB projector off", "IR left active radiance", "IR right active radiance", "SL depth green = 1 meter")
+        ):
+            draw.text((320 * col + 8, 6), title, fill="white")
         failed = []
         for row, (name, frame) in enumerate(frames.items()):
             depth = frame["depth_sl"]
@@ -146,7 +163,9 @@ def main():
             depth_color[..., 1] = np.where(finite, np.clip(1 - np.abs(depth - 1), 0, 1) * 255, 0).astype(np.uint8)
             for col, pixels in enumerate((frame["rgb"], frame["ir_left"], frame["ir_right"], depth_color)):
                 image = Image.fromarray(pixels).convert("RGB")
-                montage.paste(image, (320 * col, 240 * row))
+                montage.paste(image, (320 * col, 240 * row + 24))
+            draw.rectangle((0, 240 * row + 24, 145, 240 * row + 44), fill="black")
+            draw.text((8, 240 * row + 28), name, fill="white")
             np.savez_compressed(
                 args.output / f"{name}.npz",
                 **{k: frame[k] for k in ("rgb", "ir_left", "ir_right", "depth_sl", "depth_gt")},
@@ -158,10 +177,16 @@ def main():
         print(json.dumps(report, indent=2), flush=True)
         if failed:
             raise RuntimeError(f"Projected stereo validation failed: {failed}; inspect {args.output}")
+    except Exception:
+        # Kit's fast shutdown can terminate Python before the interpreter
+        # displays an exception raised inside a finally block.
+        traceback.print_exc()
+        exit_code = 1
+        raise
     finally:
         if capture is not None:
             capture.destroy()
-        app.close()
+        app.close(exit_code=exit_code)
 
 
 if __name__ == "__main__":

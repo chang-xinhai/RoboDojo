@@ -141,6 +141,7 @@ class StructuredLightCapture:
             for cam_id, name in enumerate(manager.camera_names[env_id]):
                 rgb_path = manager.cameras[env_id][cam_id].prim_path
                 # Wrap the authored camera without changing mounted transforms.
+                self.stage.GetPrimAtPath(rgb_path).ApplyAPI("OmniSensorAPI")
                 rgb = RtxCamera(rgb_path, reset_xform_op_properties=False)
                 # RtxCamera.camera lazily creates another wrapper whose default
                 # rewrites xform ops. Preserve the existing mounted transform.
@@ -172,7 +173,7 @@ class StructuredLightCapture:
                 projector = UsdLux.RectLight.Define(self.stage, f"{rgb_path}/projector")
                 prim = projector.GetPrim()
                 UsdLux.ShapingAPI.Apply(prim)
-                projector.CreateIntensityAttr(float(config.get("projector_intensity", 150000)))
+                projector.CreateIntensityAttr(float(config.get("projector_intensity", 1500)))
                 projector.CreateWidthAttr(1.0)
                 projector.CreateHeightAttr(1.0)
                 UsdGeom.Xformable(prim).AddTranslateOp().Set(Gf.Vec3d(0, 0, 0))
@@ -260,7 +261,8 @@ class StructuredLightCapture:
                 on_passes = self._render()
                 on = {eye: self._array(a.get_data(), shape, 3) for eye, a in rig["hdr"].items()}
                 ir = {
-                    eye: active_ir(on[eye], off[eye], float(self.config.get("saturation_radiance", 1.0))) for eye in on
+                    eye: active_ir(on[eye], off[eye], float(self.config.get("saturation_radiance", 5500.0)))
+                    for eye in on
                 }
                 phase_on_ns = time.time_ns()
                 depth_sl = reconstruct_stereo(
