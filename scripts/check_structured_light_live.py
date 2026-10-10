@@ -10,21 +10,23 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import json
+import os
 from pathlib import Path
+import shlex
 import sys
 import traceback
 from types import SimpleNamespace
 
 
 def main():
+    root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, default=Path("outputs/validation/structured_light"))
+    parser.add_argument("--output", type=Path, default=root / "reproduction/isaac61/outputs/structured-light")
     parser.add_argument("--intensity", type=float, default=1500)
     parser.add_argument("--saturation-radiance", type=float, default=5500)
     parser.add_argument("--distance", type=float, default=1.0)
     parser.add_argument("--roll-deg", type=float, default=0.0)
     args = parser.parse_args()
-    root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root))
     args.output = args.output.expanduser().resolve()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -37,7 +39,9 @@ def main():
             "headless": True,
             "fast_shutdown": True,
             "renderer": "RayTracedLighting",
-            "extra_args": zero_delay_kit_args().split() + ["--/rtx/post/aa/op=0", "--/rtx-defaults/post/aa/op=0"],
+            "extra_args": shlex.split(os.environ.get("ROBODOJO_KIT_ARGS", ""))
+            + zero_delay_kit_args().split()
+            + ["--/rtx/post/aa/op=0", "--/rtx-defaults/post/aa/op=0"],
             "width": 960,
             "height": 720,
         }
