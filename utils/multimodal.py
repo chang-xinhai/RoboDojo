@@ -219,3 +219,40 @@ class MultimodalWriter:
         os.replace(tmp, self.directory / "manifest.json")
         self.closed = True
         return manifest
+
+
+def write_failed_capture(observation, directory, reason, frame_index=0):
+    """Preserve raw sensor payloads for a failed quality check, without a pass manifest."""
+    destination = Path(directory) / "failed-frame" / f"frame_{frame_index:06d}"
+    destination.mkdir(parents=True, exist_ok=True)
+    diagnostics = {"status": "failed", "reason": str(reason), "sync": observation.get("sync", {}), "cameras": {}}
+    for name, camera in observation.get("vision", {}).items():
+        if name not in CAMERAS:
+            raise ValueError(f"Unexpected camera diagnostic filename: {name}")
+        arrays = {
+            field: numpy_copy(camera[field])
+            for field in ("rgb", "depth_gt", "depth_sl", "ir_left", "ir_right")
+            if field in camera
+        }
+        np.savez_compressed(destination / f"{name}.npz", **arrays)
+        metrics = {}
+        for field, array in arrays.items():
+            finite = np.isfinite(array)
+            metrics[field] = {
+                "shape": list(array.shape),
+                "dtype": str(array.dtype),
+                "finite_fraction": float(finite.mean()),
+                "nonzero_fraction": float((array != 0).mean()),
+                "finite_min": float(array[finite].min()) if finite.any() else None,
+                "finite_max": float(array[finite].max()) if finite.any() else None,
+            }
+            if field.startswith("depth"):
+                metrics[field]["valid_positive_fraction"] = float((finite & (array > 0)).mean())
+        diagnostics["cameras"][name] = {
+            "raw_file": f"{name}.npz",
+            "metrics": metrics,
+            "calibration": camera.get("calibration", {}),
+            "provenance": camera.get("provenance", {}),
+        }
+    (destination / "diagnostic.json").write_text(json.dumps(json_value(diagnostics), indent=2, allow_nan=False) + "\n")
+    return destination

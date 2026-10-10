@@ -51,7 +51,15 @@ class OmegaConf:
 install("omegaconf", OmegaConf=OmegaConf)
 
 class RigidObject(SimpleNamespace):
-    pass
+    def __init__(self, prim_path):
+        super().__init__(prim_path=prim_path, default_pos=[0.1, 0.2, 0.8], position=[100000.0, 100000.0, 100000.0])
+    def get_world_pose(self):
+        return self.position, [1.0, 0.0, 0.0, 0.0]
+
+class PhysicsContext:
+    frame = 0
+    def get_physics_step_count(self): return self.frame
+    def get_physics_dt(self): return .04
 
 class Env:
     dt = .04
@@ -67,6 +75,7 @@ class Env:
         )
         self.reset_complete = False
         self.placed = False
+        self.sim = SimpleNamespace(sim=PhysicsContext())
     def reset(self, **kwargs):
         self.reset_complete = True
     def apply_saved_poses(self, env_idx_list):
@@ -74,8 +83,11 @@ class Env:
         assert env_idx_list == [0]
         if mode == "placement_failure":
             raise RuntimeError("deliberate task placement failure")
+        if mode != "offscreen_not_restored":
+            for obj in self.scene_manager._rigid_and_dynamic_objects[0].values():
+                obj.position = list(obj.default_pos)
         self.placed = True
-    def sim_step(self, **kwargs): pass
+    def sim_step(self, **kwargs): self.sim.sim.frame += 1
     def close(self):
         if mode == "close_failure":
             raise RuntimeError("deliberate environment cleanup failure")
@@ -88,7 +100,10 @@ class Obs:
         self.env = env
     def get_obs(self):
         assert self.env.placed, "Objects were left in reset offscreen staging"
-        frame = fixture()
+        frame = fixture(self.env.sim.sim.frame)
+        if mode == "escaped_mid_record":
+            for obj in self.env.scene_manager._rigid_and_dynamic_objects[0].values():
+                obj.position = [100000., 100000., 100000.]
         for camera in frame["vision"].values():
             camera["ir_left"][:] = 1
             camera["depth_sl"][:] = 1
@@ -149,6 +164,10 @@ class CollectorExitTests(unittest.TestCase):
             self.assertEqual(validation["scene"]["actual_object_counts"]["rigid_and_dynamic_objects"], 1)
             self.assertEqual(len(validation["layout"]["sha256"]), 64)
             self.assertTrue(validation["scene"]["saved_poses_applied"])
+            self.assertTrue(validation["scene"]["placement_verified"])
+            self.assertEqual(validation["scene_final"]["physics_frame"], validation["frames"][-1]["physics_frame"])
+            self.assertLess(validation["scene_initial"]["physics_frame"], validation["scene_final"]["physics_frame"])
+            self.assertEqual(validation["scene"]["live_placements"]["/World/test"]["world_center"], [0.1, 0.2, 0.8])
 
     def test_missing_task_objects_never_produce_successful_recording(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -172,6 +191,23 @@ class CollectorExitTests(unittest.TestCase):
             self.assertIn("deliberate task placement failure", result.stderr)
             self.assertFalse((Path(directory) / "validation.json").exists())
             self.assertFalse((Path(directory) / "manifest.json").exists())
+
+    def test_offscreen_objects_are_rejected_even_after_placement_callback_returns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_collector("offscreen_not_restored", directory)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("offscreen/unplaced", result.stderr)
+            self.assertFalse((Path(directory) / "validation.json").exists())
+            self.assertFalse((Path(directory) / "manifest.json").exists())
+
+    def test_object_escape_after_initial_verification_prevents_completion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_collector("escaped_mid_record", directory)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("offscreen/unplaced", result.stderr)
+            self.assertTrue((Path(directory) / "frame_000000.npz").exists())
+            self.assertFalse((Path(directory) / "manifest.json").exists())
+            self.assertFalse((Path(directory) / "validation.json").exists())
 
     def test_environment_cleanup_failure_survives_direct_process_exit(self):
         with tempfile.TemporaryDirectory() as directory:

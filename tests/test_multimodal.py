@@ -10,7 +10,14 @@ from unittest.mock import patch
 
 import numpy as np
 
-from utils.multimodal import CAMERAS, SCHEMA_VERSION, MultimodalWriter, read_frame, validate_multimodal
+from utils.multimodal import (
+    CAMERAS,
+    SCHEMA_VERSION,
+    MultimodalWriter,
+    read_frame,
+    validate_multimodal,
+    write_failed_capture,
+)
 
 
 def fixture(frame=1):
@@ -243,6 +250,20 @@ class RecordingTests(unittest.TestCase):
         manager.camera_manager.advance = True
         with self.assertRaisesRegex(RuntimeError, "Physics advanced"):
             manager._capture_multimodal({0: {}}, [0])
+
+    def test_failed_quality_capture_preserves_raw_inputs_and_calibration(self):
+        data = fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            destination = write_failed_capture(data, directory, "no projected IR signal", frame_index=3)
+            metadata = json.loads((destination / "diagnostic.json").read_text())
+            self.assertEqual(metadata["status"], "failed")
+            self.assertEqual(metadata["cameras"]["head"]["metrics"]["ir_left"]["nonzero_fraction"], 0)
+            self.assertEqual(metadata["cameras"]["head"]["metrics"]["depth_sl"]["valid_positive_fraction"], 0)
+            for name in CAMERAS:
+                with np.load(destination / f"{name}.npz", allow_pickle=False) as arrays:
+                    np.testing.assert_equal(arrays["depth_sl"], data["vision"][name]["depth_sl"])
+                    np.testing.assert_equal(arrays["ir_left"], data["vision"][name]["ir_left"])
+            self.assertFalse((Path(directory) / "manifest.json").exists())
 
     def test_fake_tactile_backend_is_rejected(self):
         data = fixture()

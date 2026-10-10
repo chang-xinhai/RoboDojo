@@ -53,7 +53,7 @@ launcher = AppLauncher(args)
 app = launcher.app
 success = False
 try:
-    from utils.isaaclab_compat import enable_legacy_isaacsim_extensions
+    from utils.isaaclab_compat import enable_legacy_isaacsim_extensions, simulation_snapshot
 
     enable_legacy_isaacsim_extensions()
     import numpy as np
@@ -62,7 +62,7 @@ try:
     from env.observation_manager.obs_manager import ObsManager
     from task.RoboDojo.task_registry import load_task_class
     from utils.load_file import load_yaml
-    from utils.multimodal import MultimodalWriter, json_value
+    from utils.multimodal import MultimodalWriter, json_value, write_failed_capture
     from utils.task_layout import load_task_layout, verify_task_scene
 
     eval_cfg = load_yaml(str(ROOT / "env_cfg" / (args.env_cfg + ".yml")))
@@ -91,6 +91,8 @@ try:
     env.scene_manager.apply_saved_poses(env_idx_list=[0])
     scene_validation = verify_task_scene(env.scene_manager, layout)
     scene_validation["saved_poses_applied"] = True
+    initial_time, initial_frame = simulation_snapshot(env.sim.sim)
+    scene_validation.update(physics_frame=initial_frame, timestamp_ns=round(initial_time * 1e9))
     obs_cfg = eval_cfg["observation"]
     if not obs_cfg.get("multimodal"):
         raise ValueError("Collector requires observation.multimodal=true; use arx_x5_multimodal")
@@ -101,7 +103,6 @@ try:
     motion = None
     motion_validation = {"enabled": False}
     if args.motion_demo:
-        from utils.isaaclab_compat import simulation_snapshot
         from utils.motion_demo import WristMotionDemo
 
         motion = WristMotionDemo(env.robot_manager, args.motion_amplitude, args.motion_frequency)
@@ -133,13 +134,18 @@ try:
         for name, camera in frame["vision"].items():
             valid = np.isfinite(camera["depth_sl"]) & (camera["depth_sl"] > 0)
             fraction = float(valid.mean())
+            failure = None
             if fraction < args.min_sl_valid_fraction:
-                raise RuntimeError(
+                failure = (
                     f"{name}: structured-light reconstruction valid fraction {fraction:.6f} "
                     f"below required {args.min_sl_valid_fraction}"
                 )
-            if not camera["ir_left"].any() or not camera["ir_right"].any():
-                raise RuntimeError(f"{name}: projector IR capture has no intensity signal")
+            elif not camera["ir_left"].any() or not camera["ir_right"].any():
+                failure = f"{name}: projector IR capture has no intensity signal"
+            if failure:
+                diagnostic = write_failed_capture(frame, args.output, failure, frame_index=index)
+                print(json.dumps({"status": "failed", "diagnostic": str(diagnostic), "reason": failure}), flush=True)
+                raise RuntimeError(failure)
             quality[name] = {
                 "structured_light_valid_fraction": fraction,
                 "ir_left_nonzero_fraction": float((camera["ir_left"] > 0).mean()),
@@ -162,6 +168,20 @@ try:
         print(json.dumps(report), flush=True)
     if motion:
         motion_validation = motion.validate_motion()
+    # Recheck native placement against the same final physics state captured
+    # by the sensors, before publishing a completed recording manifest.
+    final_time, final_frame = simulation_snapshot(env.sim.sim)
+    if final_frame != frame["sync"]["physics_frame"] or round(final_time * 1e9) != frame["sync"]["timestamp_ns"]:
+        raise RuntimeError("Physics advanced after final sensor capture")
+    final_scene_validation = verify_task_scene(env.scene_manager, layout)
+    if simulation_snapshot(env.sim.sim) != (final_time, final_frame):
+        raise RuntimeError("Physics advanced while validating final task placement")
+    final_scene_validation.update(
+        saved_poses_applied=True, physics_frame=final_frame, timestamp_ns=round(final_time * 1e9)
+    )
+    writer.run_metadata.update(
+        scene_initial=scene_validation, scene_final=final_scene_validation, scene=final_scene_validation
+    )
     writer.close()
     env.close()
     if args.visualize:
@@ -175,7 +195,9 @@ try:
                 "real_runtime": True,
                 "frames": reports,
                 "layout": layout_provenance,
-                "scene": scene_validation,
+                "scene": final_scene_validation,
+                "scene_initial": scene_validation,
+                "scene_final": final_scene_validation,
                 "motion_demo": motion_validation,
             },
             indent=2,
