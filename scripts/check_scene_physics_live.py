@@ -43,6 +43,7 @@ def main():
         "cloth_reset.png",
         "fluid_before.png",
         "fluid_after.png",
+        "fluid_reset.png",
     ):
         (args.output / stale).unlink(missing_ok=True)
     from isaacsim import SimulationApp
@@ -82,7 +83,7 @@ def main():
             np.asarray(eye), np.asarray([quaternion.GetReal(), *quaternion.GetImaginary()]), camera_axes="usd"
         )
         camera.set_focal_length(12.0)
-        camera.set_horizontal_aperture(20.0, False)
+        camera.set_horizontal_aperture(20.0)
         if args.fluid_only:
             _validate_fluid_only(args, sim, stage, camera)
             return 0
@@ -221,9 +222,10 @@ def main():
         projected = projection[:, :2] / projection[:, 2:3]
         rendered_center = reset_pixels[:, [1, 0]].mean(axis=0)
         report["cloth_reset_render_center_px"] = rendered_center.tolist()
+        report["cloth_reset_projected_bounds_px"] = [projected.min(axis=0).tolist(), projected.max(axis=0).tolist()]
+        Image.fromarray(rgb_reset).save(args.output / "cloth_reset.png")
         assert np.all(rendered_center >= projected.min(axis=0) - 10), "Rendered cloth lags behind the physical reset"
         assert np.all(rendered_center <= projected.max(axis=0) + 10), "Rendered cloth lags behind the physical reset"
-        Image.fromarray(rgb_reset).save(args.output / "cloth_reset.png")
         report.update(
             status="passed",
             real_runtime=True,
@@ -325,10 +327,19 @@ def _validate_fluid_only(args, sim, stage, camera):
         # by one maximum-speed step. Reject a stale pose or doubled transform.
         report["fluid_reset_max_allowed_step_m"] = 1.5 * 2.5 / 120
         assert report["fluid_reset_one_step_max_error_m"] < report["fluid_reset_max_allowed_step_m"], report
-        np.savez(args.output / "fluid_motion.npz", before=before, after=after)
+        for _ in range(5):
+            sim.render()
+        rgb_reset = camera.get_rgba()[..., :3].copy()
+        report["fluid_reset_rgb_mean_abs_change"] = float(
+            np.mean(np.abs(rgb_reset.astype(float) - rgb_after.astype(float)))
+        )
+        assert report["fluid_reset_rgb_mean_abs_change"] > 0.01, "PBD reset did not reach the renderer"
+        np.savez(args.output / "fluid_motion.npz", before=before, after=after, reset=fluid.get_particle_positions()[0])
         Image.fromarray(rgb_before).save(args.output / "fluid_before.png")
         Image.fromarray(rgb_after).save(args.output / "fluid_after.png")
-        stage.Flatten().Export(str(args.output / "validated_scene.usda"))
+        Image.fromarray(rgb_reset).save(args.output / "fluid_reset.png")
+        if not stage.Flatten().Export(str(args.output / "validated_scene.usda")):
+            raise RuntimeError("Could not export the validated fluid stage")
         (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report, indent=2), flush=True)
         sim.stop()

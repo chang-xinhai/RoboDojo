@@ -63,8 +63,18 @@ class Env:
         self.scene_manager = SimpleNamespace(
             _rigid_and_dynamic_objects=[objects],
             stage=SimpleNamespace(GetPrimAtPath=lambda path: SimpleNamespace(IsValid=lambda: True)),
+            apply_saved_poses=self.apply_saved_poses,
         )
-    def reset(self, **kwargs): pass
+        self.reset_complete = False
+        self.placed = False
+    def reset(self, **kwargs):
+        self.reset_complete = True
+    def apply_saved_poses(self, env_idx_list):
+        assert self.reset_complete, "Saved poses must be applied after reset staging"
+        assert env_idx_list == [0]
+        if mode == "placement_failure":
+            raise RuntimeError("deliberate task placement failure")
+        self.placed = True
     def sim_step(self, **kwargs): pass
     def close(self):
         if mode == "close_failure":
@@ -74,8 +84,10 @@ class Obs:
     collect_freq = 25
     collect_interval = 1
     def __init__(self, *args, **kwargs): pass
-    def initialize(self, env): pass
+    def initialize(self, env):
+        self.env = env
     def get_obs(self):
+        assert self.env.placed, "Objects were left in reset offscreen staging"
         frame = fixture()
         for camera in frame["vision"].values():
             camera["ir_left"][:] = 1
@@ -136,6 +148,7 @@ class CollectorExitTests(unittest.TestCase):
             validation = json.loads((Path(directory) / "validation.json").read_text())
             self.assertEqual(validation["scene"]["actual_object_counts"]["rigid_and_dynamic_objects"], 1)
             self.assertEqual(len(validation["layout"]["sha256"]), 64)
+            self.assertTrue(validation["scene"]["saved_poses_applied"])
 
     def test_missing_task_objects_never_produce_successful_recording(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -151,6 +164,14 @@ class CollectorExitTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn("deliberate legacy extension initialization failure", result.stderr)
             self.assertFalse((Path(directory) / "validation.json").exists())
+
+    def test_task_placement_failure_never_produces_successful_recording(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_collector("placement_failure", directory)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("deliberate task placement failure", result.stderr)
+            self.assertFalse((Path(directory) / "validation.json").exists())
+            self.assertFalse((Path(directory) / "manifest.json").exists())
 
     def test_environment_cleanup_failure_survives_direct_process_exit(self):
         with tempfile.TemporaryDirectory() as directory:

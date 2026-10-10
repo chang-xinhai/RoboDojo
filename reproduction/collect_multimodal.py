@@ -85,7 +85,12 @@ try:
     cfg.saved_layouts = [layout]
     env = task_class(cfg, app, seed=0)
     env.reset(seed=0)
+    # TaskEnv stages CUDA objects offscreen during reset and calibrates the
+    # empty TacSL gel there. Place the canonical task objects/table afterward,
+    # following EvalEnv.setup_scene, without recalibrating away contact.
+    env.scene_manager.apply_saved_poses(env_idx_list=[0])
     scene_validation = verify_task_scene(env.scene_manager, layout)
+    scene_validation["saved_poses_applied"] = True
     obs_cfg = eval_cfg["observation"]
     if not obs_cfg.get("multimodal"):
         raise ValueError("Collector requires observation.multimodal=true; use arx_x5_multimodal")
