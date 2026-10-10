@@ -7,6 +7,18 @@ export PATH="$ROBODOJO_VENV/bin:$PATH"
 source "$ROBODOJO_ROOT/reproduction/isaac61/environment.sh"
 cd "$ROBODOJO_ROOT"
 export PYTHONPATH="$ROBODOJO_ROOT:$ROBODOJO_ROOT/XPolicyLab${PYTHONPATH:+:$PYTHONPATH}"
+report_output() {
+  local report_path="$1"
+  shift
+  while (($#)); do
+    case "$1" in
+      --output) report_path="${2:?--output requires a path}"; shift ;;
+      --output=*) report_path="${1#--output=}" ;;
+    esac
+    shift
+  done
+  printf '%s' "$report_path"
+}
 case "${1:-}" in
   smoke)
     shift
@@ -16,9 +28,10 @@ case "${1:-}" in
     ;;
   task-smoke)
     shift
-    rm -f reproduction/isaac61/task-smoke.json
+    REPORT_OUTPUT="$(report_output reproduction/isaac61/task-smoke.json "$@")"
+    rm -f "$REPORT_OUTPUT"
     python reproduction/smoke_task.py --output reproduction/isaac61/task-smoke.json --viz none --kit_args "$ROBODOJO_KIT_ARGS" "$@"
-    python -c 'import json; assert json.load(open("reproduction/isaac61/task-smoke.json"))["status"] == "passed"'
+    python -c 'import json, sys; assert json.load(open(sys.argv[1]))["status"] == "passed"' "$REPORT_OUTPUT"
     ;;
   collect)
     shift
