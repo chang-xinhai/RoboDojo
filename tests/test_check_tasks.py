@@ -19,6 +19,10 @@ def evidence():
         "num_envs": 1,
         "checks": sorted(runner.REQUIRED_CHECKS),
         "policy_evaluation": False,
+        "real_runtime": True,
+        "physics_steps": 10,
+        "packages": {"isaacsim": "6.1.0.0", "isaaclab": "3.0.0"},
+        "isaaclab_source_commit": "ea_pin",
         "camera_shapes": {"cam_" + name: {"rgb": [48, 64, 3], "depth": [48, 64]} for name in runner.CAMERAS},
     }
 
@@ -42,6 +46,18 @@ class AcceptanceTests(unittest.TestCase):
     def test_full_rgbd_evidence_is_accepted(self):
         sample = evidence()
         self.assertIs(runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd"), sample)
+
+    def test_legacy_color_alias_is_accepted_without_fabricating_rgb(self):
+        sample = evidence()
+        for camera in sample["camera_shapes"].values():
+            camera["color"] = camera.pop("rgb")
+        self.assertIs(runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd"), sample)
+
+    def test_missing_actual_runtime_and_unstepped_scene_are_rejected(self):
+        for field, value in (("real_runtime", False), ("physics_steps", 0), ("isaaclab_source_commit", None)):
+            sample = dict(evidence(), **{field: value})
+            with self.assertRaises(ValueError):
+                runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd")
 
     def test_missing_camera_and_misaligned_depth_are_rejected(self):
         missing = evidence()
@@ -75,6 +91,9 @@ class AcceptanceTests(unittest.TestCase):
         older = deepcopy(ctx)
         older["packages"]["isaacsim"] = "5.1.0.0"
         self.assertFalse(runner.can_resume(dict(record, context=older), older, "stack_bowls", "arx_x5_rgbd"))
+        changed_lab = deepcopy(record)
+        changed_lab["evidence"]["isaaclab_source_commit"] = "different_lab_pin"
+        self.assertFalse(runner.can_resume(changed_lab, ctx, "stack_bowls", "arx_x5_rgbd"))
 
     def test_zero_exit_without_fresh_output_cannot_reuse_stale_pass(self):
         with tempfile.TemporaryDirectory() as directory:

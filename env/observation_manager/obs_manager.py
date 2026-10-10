@@ -257,9 +257,24 @@ class ObsManager:
                     sample = {}
                     for field, value in data.items():
                         if hasattr(value, "shape"):
-                            sample[field] = numpy_copy(value[env_idx])
+                            selected = value[env_idx]
+                        elif isinstance(value, (list, tuple)) and field in {
+                            "normal_force",
+                            "shear_force",
+                            "penetration_depth",
+                            "points_pos_w",
+                            "provenance",
+                            "metadata",
+                        }:
+                            if len(value) != self.num_envs:
+                                raise RuntimeError(
+                                    f"TacSL {side}.{finger}.{field}: per-environment values must contain "
+                                    f"{self.num_envs} samples, received {len(value)}"
+                                )
+                            selected = value[env_idx]
                         else:
-                            sample[field] = deepcopy(value)
+                            selected = value
+                        sample[field] = numpy_copy(selected) if hasattr(selected, "shape") else deepcopy(selected)
                     obs[env_idx]["tactile"][side][finger] = sample
             obs[env_idx]["sync"] = {
                 "schema": SCHEMA_VERSION,

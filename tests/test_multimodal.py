@@ -187,6 +187,7 @@ class RecordingTests(unittest.TestCase):
                 }
 
         manager = module.ObsManager.__new__(module.ObsManager)
+        manager.num_envs = 3
         manager.env = SimpleNamespace(sim=SimpleNamespace(sim=context))
         manager.camera_manager = Cameras()
         manager.tactile_manager = Tactile()
@@ -202,6 +203,43 @@ class RecordingTests(unittest.TestCase):
                 source["tactile"]["left"]["finger_0"]["rgb"],
             )
         )
+
+        class MixedTactile(Tactile):
+            def get_observations(self):
+                batch = super().get_observations()
+                for fingers in batch.values():
+                    for sample in fingers.values():
+                        for field in ("normal_force", "shear_force", "penetration_depth", "points_pos_w"):
+                            sample[field] = [None, sample[field][1], sample[field][2]]
+                        sample["provenance"] = [
+                            {
+                                "backend": "isaaclab_tacsl",
+                                "force_field_available": False,
+                                "force_unavailable_reason": "cloth contact has no rigid SDF",
+                            },
+                            {"backend": "isaaclab_tacsl", "force_field_available": True},
+                            {"backend": "isaaclab_tacsl", "force_field_available": True},
+                        ]
+                        sample["metadata"] = [
+                            {"contact_object_paths": []},
+                            {"contact_object_paths": ["/World/envs/env_1/object"]},
+                            {"contact_object_paths": ["/World/envs/env_2/object"]},
+                        ]
+                return batch
+
+        manager.tactile_manager = MixedTactile()
+        mixed = {2: {}, 0: {}}
+        manager._capture_multimodal(mixed, [2, 0])
+        for sample in mixed.values():
+            validate_multimodal(sample)
+        cloth = mixed[0]["tactile"]["left"]["finger_0"]
+        rigid = mixed[2]["tactile"]["left"]["finger_0"]
+        self.assertIsNone(cloth["normal_force"])
+        self.assertFalse(cloth["provenance"]["force_field_available"])
+        self.assertTrue(rigid["provenance"]["force_field_available"])
+        np.testing.assert_equal(rigid["normal_force"], source["tactile"]["left"]["finger_0"]["normal_force"])
+        self.assertEqual(rigid["metadata"]["contact_object_paths"], ["/World/envs/env_2/object"])
+
         manager.camera_manager.advance = True
         with self.assertRaisesRegex(RuntimeError, "Physics advanced"):
             manager._capture_multimodal({0: {}}, [0])

@@ -91,13 +91,19 @@ def check_evidence(evidence, task, env_cfg):
         raise ValueError("Smoke status/task/config does not match this invocation")
     if evidence.get("num_envs") != 1 or evidence.get("policy_evaluation") is not False:
         raise ValueError("Expected one-environment scene smoke without policy evaluation")
+    if evidence.get("real_runtime") is not True or evidence.get("physics_steps", 0) < 10:
+        raise ValueError("Expected actual runtime evidence with at least ten physics steps")
+    if not is_sim61(evidence.get("packages", {}).get("isaacsim")):
+        raise ValueError("Smoke must identify actual Isaac Sim 6.1.0 runtime")
+    if not evidence.get("isaaclab_source_commit"):
+        raise ValueError("Smoke must identify the Isaac Lab source commit")
     if not REQUIRED_CHECKS.issubset(evidence.get("checks", [])):
         raise ValueError("Missing scene/reset/RGBD acceptance checks")
     cameras = {name.removeprefix("cam_"): shape for name, shape in evidence.get("camera_shapes", {}).items()}
     if set(cameras) != CAMERAS:
         raise ValueError(f"Expected head and both wrist RGBD cameras, received {sorted(cameras)}")
     for name, fields in cameras.items():
-        rgb, depth = fields.get("rgb", []), fields.get("depth", [])
+        rgb, depth = fields.get("rgb", fields.get("color", [])), fields.get("depth", [])
         if len(rgb) != 3 or rgb[2] != 3 or min(rgb[:2]) < 1:
             raise ValueError(f"Invalid {name} RGB shape: {rgb}")
         if depth != rgb[:2]:
@@ -114,7 +120,14 @@ def can_resume(record, context, task, env_cfg):
         check_evidence(record.get("evidence", {}), task, env_cfg)
     except (ValueError, TypeError, AttributeError):
         return False
-    return record.get("process_exit_code") == 0 and record.get("real_runtime") is True
+    return (
+        record.get("process_exit_code") == 0
+        and record.get("real_runtime") is True
+        and record["evidence"]["isaaclab_source_commit"] == context.get("isaaclab_source_commit")
+        and all(
+            context.get("packages", {}).get(name) == version for name, version in record["evidence"]["packages"].items()
+        )
+    )
 
 
 def execute_process(command, log_path, timeout, *, environment=None, cwd=ROOT):
@@ -177,6 +190,12 @@ def run_task(task, args, context):
     else:
         try:
             record["evidence"] = check_evidence(json.loads(output.read_text()), task, args.env_cfg)
+            if record["evidence"]["isaaclab_source_commit"] != context["isaaclab_source_commit"]:
+                raise ValueError("Task used a different Isaac Lab source commit")
+            if any(
+                context["packages"].get(name) != version for name, version in record["evidence"]["packages"].items()
+            ):
+                raise ValueError("Task used different runtime package versions")
             record["status"] = "passed"
         except (OSError, ValueError, TypeError, AttributeError) as exc:
             record["error"] = f"Missing or invalid fresh runtime evidence: {exc}"
