@@ -15,7 +15,9 @@ from reproduction.isaac61 import check_tasks as runner
 
 FIXTURE_DIRECTORY = tempfile.TemporaryDirectory()
 FIXTURE_LAYOUT = Path(FIXTURE_DIRECTORY.name) / "stack_bowls_0.json"
-FIXTURE_LAYOUT.write_text(json.dumps({"Rigid": {"bowl": [{}, {}, {}]}}))
+FIXTURE_LAYOUT.write_text(
+    json.dumps({"Rigid": {"bowl": [{"category_idx": 10, "default_pos": [i * 0.1, 0, 0.8]} for i in range(3)]}})
+)
 
 
 def evidence():
@@ -24,7 +26,7 @@ def evidence():
     actual = dict.fromkeys(runner.OBJECT_STORAGES.values(), 0)
     actual["rigid_and_dynamic_objects"] = 3
     paths = {storage: [] for storage in actual}
-    paths["rigid_and_dynamic_objects"] = [f"/World/envs/env_0/Rigid/bowl/bowl_{i}" for i in range(3)]
+    paths["rigid_and_dynamic_objects"] = [f"/World/envs/env_0/rigid/bowl/bowl_10_{i}" for i in range(3)]
     return {
         "status": "passed",
         "task": "stack_bowls",
@@ -48,11 +50,24 @@ def evidence():
             "actual_object_counts": actual,
             "object_prim_paths": paths,
             "actual_physical_type_counts": expected.copy(),
+            "env_origin": [0, 0, 0],
+            "placement_verified": True,
+            "live_placements": {
+                path: {
+                    "state_source": "native_body_pose",
+                    "world_center": [i * 0.1, 0, 0.8],
+                    "relative_center": [i * 0.1, 0, 0.8],
+                    "saved_relative_position": [i * 0.1, 0, 0.8],
+                    "max_distance_from_env_origin_m": (i * i * 0.01 + 0.64) ** 0.5,
+                    "center_distance_from_saved_position_m": 0,
+                }
+                for i, path in enumerate(paths["rigid_and_dynamic_objects"])
+            },
             "wrapper_types": {
                 path: {
                     "class": "env.scene_manager.objects.rigid.RigidObject",
                     "physical_type": "Rigid",
-                    "instance_name": f"bowl_{i}",
+                    "instance_name": f"bowl_10_{i}",
                     "layout_type": "rigid",
                 }
                 for i, path in enumerate(paths["rigid_and_dynamic_objects"])
@@ -169,6 +184,79 @@ class AcceptanceTests(unittest.TestCase):
         wrong["scene"]["actual_physical_type_counts"].update(Rigid=2, Dynamic=1)
         with self.assertRaisesRegex(ValueError, "Shared storage"):
             runner.check_evidence(wrong, "stack_bowls", "arx_x5_rgbd")
+
+    def test_counted_objects_and_rgbd_background_cannot_replace_live_placement(self):
+        for field in ("live_placements", "placement_verified", "env_origin"):
+            missing = evidence()
+            del missing["scene"][field]
+            with self.assertRaises(ValueError):
+                runner.check_evidence(missing, "stack_bowls", "arx_x5_rgbd")
+        offscreen = evidence()
+        placement = next(iter(offscreen["scene"]["live_placements"].values()))
+        placement.update(
+            world_center=[99, 0, 0.8],
+            relative_center=[99, 0, 0.8],
+            max_distance_from_env_origin_m=99.01,
+            center_distance_from_saved_position_m=99,
+        )
+        with self.assertRaisesRegex(ValueError, "too far"):
+            runner.check_evidence(offscreen, "stack_bowls", "arx_x5_rgbd")
+
+    def test_placement_nonfinite_frames_sources_and_fabricated_distance_are_rejected(self):
+        cases = (
+            ("world_center", [float("nan"), 0, 0.8]),
+            ("relative_center", [0, 0, 1.8]),
+            ("state_source", "usd_authoring_transform"),
+            ("center_distance_from_saved_position_m", 0.2),
+            ("max_distance_from_env_origin_m", 0),
+            ("saved_relative_position", [0, 0, 1.2]),
+        )
+        for field, value in cases:
+            sample = evidence()
+            next(iter(sample["scene"]["live_placements"].values()))[field] = value
+            with self.assertRaises(ValueError):
+                runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd")
+
+    def test_live_positions_use_environment_origin_once(self):
+        sample = evidence()
+        origin = [10, 20, 30]
+        sample["scene"]["env_origin"] = origin
+        for placement in sample["scene"]["live_placements"].values():
+            placement["world_center"] = [a + b for a, b in zip(placement["relative_center"], origin)]
+        self.assertIs(runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd"), sample)
+
+    def test_duplicate_saved_position_cannot_cover_distinct_layout_instances(self):
+        sample = evidence()
+        placements = list(sample["scene"]["live_placements"].values())
+        placements[1].update(saved_relative_position=[0, 0, 0.8], center_distance_from_saved_position_m=0.1)
+        with self.assertRaisesRegex(ValueError, "cover all objects"):
+            runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd")
+
+    def test_extra_camera_stand_fixture_has_placement_but_cannot_replace_bowls(self):
+        sample = evidence()
+        scene = sample["scene"]
+        path = "/World/envs/env_0/geometry/camera_stand/camera_stand_0_11"
+        scene["actual_object_counts"]["geometry_objects"] = 1
+        scene["object_prim_paths"]["geometry_objects"] = [path]
+        scene["actual_physical_type_counts"]["Geometry"] = 1
+        scene["wrapper_types"][path] = {
+            "class": "env.scene_manager.objects.geometry.GeometryObject",
+            "physical_type": "Geometry",
+            "instance_name": "camera_stand_0_11",
+            "layout_type": "geometry",
+        }
+        scene["live_placements"][path] = {
+            "state_source": "static_geometry_pose",
+            "world_center": [0, 0, 0.8],
+            "relative_center": [0, 0, 0.8],
+            "saved_relative_position": [0, 0, 0.8],
+            "center_distance_from_saved_position_m": 0,
+            "max_distance_from_env_origin_m": 0.8,
+        }
+        self.assertIs(runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd"), sample)
+        del scene["live_placements"][path]
+        with self.assertRaisesRegex(ValueError, "Every actual task object"):
+            runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd")
 
     def test_resume_rejects_wrong_revision_runtime_exit_and_evidence(self):
         ctx = context()

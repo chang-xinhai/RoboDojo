@@ -8,6 +8,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import numpy as np
+
 OBJECT_STORAGES = {
     "Rigid": "_rigid_and_dynamic_objects",
     "Dynamic": "_rigid_and_dynamic_objects",
@@ -19,6 +21,58 @@ OBJECT_STORAGES = {
 
 
 WRAPPER_PHYSICAL_TYPES = {f"{physical_type}Object": physical_type for physical_type in OBJECT_STORAGES}
+
+
+def _numpy(value):
+    return value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
+
+
+def live_object_placement(obj, physical_type, env_origin):
+    """Reject staging/offscreen objects using their actual runtime state."""
+    if physical_type == "Fluid":
+        points = _numpy(obj.get_particle_positions()[0])
+        # Native PBD output updates PointInstancer positions in its local
+        # frame. Its parent Xform remains static and must be applied once.
+        from pxr import Gf, Usd, UsdGeom
+
+        transform = UsdGeom.Xformable(obj.point_instancer.GetPrim()).ComputeLocalToWorldTransform(
+            Usd.TimeCode.Default()
+        )
+        points = np.asarray([transform.Transform(Gf.Vec3d(*map(float, point))) for point in points])
+        source = "native_pbd_particle_readback"
+    elif physical_type in ("Garment", "Dynamic"):
+        points = _numpy(obj.sample_mesh_vertices()[0])
+        source = "native_surface_nodes" if physical_type == "Garment" else "live_mesh_vertices"
+    else:
+        points = _numpy(obj.get_world_pose()[0]).reshape(1, 3)
+        source = "native_body_pose" if physical_type in ("Rigid", "Articulation") else "static_geometry_pose"
+    if points.ndim != 2 or points.shape[1] != 3 or not len(points) or not np.isfinite(points).all():
+        raise RuntimeError(f"Task object {obj.prim_path} has no finite live placement ({source})")
+    relative = points - _numpy(env_origin).reshape(3)
+    max_distance = float(np.max(np.linalg.norm(relative, axis=1)))
+    if max_distance > 100.0:
+        raise RuntimeError(
+            f"Task object {obj.prim_path} is offscreen/unplaced: {max_distance:.3f} m from environment origin; "
+            "call scene_manager.apply_saved_poses after TaskEnv.reset"
+        )
+    placement = {
+        "state_source": source,
+        "world_center": points.mean(axis=0).tolist(),
+        "relative_center": relative.mean(axis=0).tolist(),
+        "max_distance_from_env_origin_m": max_distance,
+    }
+    saved_position = getattr(obj, "default_pos", getattr(obj, "init_pos", None))
+    if saved_position is not None:
+        placement["saved_relative_position"] = _numpy(saved_position).reshape(3).tolist()
+        placement["center_distance_from_saved_position_m"] = float(
+            np.linalg.norm(relative.mean(axis=0) - _numpy(saved_position).reshape(3))
+        )
+        if placement["center_distance_from_saved_position_m"] > 5.0:
+            raise RuntimeError(
+                f"Task object {obj.prim_path} is outside the saved layout region: "
+                f"{placement['center_distance_from_saved_position_m']:.3f} m from its saved position"
+            )
+    return placement
 
 
 def expected_object_counts(layout):
@@ -79,9 +133,15 @@ def verify_task_scene(scene_manager, layout, env_id=0):
     physical_type_counts = {physical_type: 0 for physical_type in OBJECT_STORAGES}
     wrapper_types = {}
     physics_migration = {}
+    placements = {}
+    env_origins = getattr(scene_manager, "env_origins", None)
+    env_origin = env_origins[env_id] if env_origins is not None else np.zeros(3)
     for storage, expected_count in expected_by_storage.items():
         batches = getattr(scene_manager, storage, None)
         objects = batches[env_id] if batches is not None else {}
+        inactive_batches = getattr(scene_manager, "_inactive_scene_object_names", None)
+        inactive = inactive_batches[env_id] if inactive_batches is not None else set()
+        objects = {name: obj for name, obj in objects.items() if name not in inactive}
         actual[storage.removeprefix("_")] = len(objects)
         if len(objects) < expected_count:
             raise RuntimeError(
@@ -120,6 +180,7 @@ def verify_task_scene(scene_manager, layout, env_id=0):
                     f"Task object {path} layout declares {declared} but live wrapper is {wrapper.__name__}"
                 )
             physical_type_counts[physical_type] += 1
+            placements[path] = live_object_placement(obj, physical_type, env_origin)
             prim = stage.GetPrimAtPath(path)
             wrapper_types[path] = {
                 "class": f"{wrapper.__module__}.{wrapper.__qualname__}",
@@ -147,4 +208,10 @@ def verify_task_scene(scene_manager, layout, env_id=0):
         "actual_physical_type_counts": physical_type_counts,
         "wrapper_types": wrapper_types,
         "physics_migration": physics_migration,
+        "live_placements": placements,
+        "env_origin": _numpy(env_origin).reshape(3).tolist(),
+        "placement_verified": True,
+        "inactive_object_names": sorted(
+            getattr(scene_manager, "_inactive_scene_object_names", [set()] * (env_id + 1))[env_id]
+        ),
     }

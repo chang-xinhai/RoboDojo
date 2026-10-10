@@ -80,7 +80,7 @@ Run GPU jobs sequentially on this workstation:
 ```bash
 bash reproduction/isaac61/run.sh test tests
 bash reproduction/isaac61/run.sh smoke
-bash reproduction/isaac61/run.sh task-smoke --task stack_bowls
+bash reproduction/isaac61/run.sh task-smoke --task stack_bowls --check-reset --repeat-envs 2
 bash reproduction/isaac61/run.sh python scripts/check_structured_light_live.py
 bash reproduction/isaac61/run.sh tactile-smoke
 bash reproduction/isaac61/run.sh python scripts/check_scene_physics_live.py
@@ -104,3 +104,56 @@ FEM, live nodal state and nodal reset rather than a static substitute. Fluid
 retains PBD simulation. The cloth material/solver changed, so benchmark scores
 are not directly equivalent to the old particle-cloth runtime. Unsupported
 legacy wind/aerodynamic and cloth-fluid settings fail explicitly.
+
+## Physics and pose compatibility
+
+Task layouts are installed before scene construction and explicitly restored
+after `TaskEnv.reset()`, which first stages existing CUDA objects offscreen.
+Acceptance reports verify actual native body positions, live mesh vertices,
+surface nodes or PBD particle readback rather than only counting USD prims.
+Retained CUDA objects keep their original prim paths when layout metadata is
+reloaded, preserving labels and functional frames. Evaluators preload the
+finite remaining replay cohort's retained asset variants and maximum simultaneous
+counts before the first physics warmup. Variants include the collider asset,
+mass/friction settings, scale and visual configuration, so a changed physical
+configuration selects its own native body. Decreasing the active count parks
+unused cached bodies; an unprepared asset variant or increased cached quantity
+requires a fresh TaskEnv and fails before metadata is changed.
+Captures reject nonfinite
+state, objects more than 100 m from their environment origin, or centers more
+than 5 m from the saved placement.
+
+Rigid bodies reset linear and angular velocity together through the native
+six-component tensor API; articulated objects also clear joint velocities.
+X5 reset writes actual joint state and resets actuator state before assigning
+drive targets. The motion/reset smoke moves both arms and real bodies, checks
+exact immediate velocity/pose restoration, then exercises a full task reset.
+Its repeated-environment option validates two independent scenes and RGBD
+captures in one Kit app. Lab 3 owns PhysX and stage teardown; RoboDojo releases
+wrappers before closing that context and creates a new pure-USD authoring
+stage for the next environment.
+
+The finite-cohort regression can also switch canonical models and query actual
+PhysX masses across a separately pooled mass variant:
+
+```bash
+bash reproduction/isaac61/run.sh task-smoke --task stack_bowls \
+  --replay-layout-ids 1 --probe-mass-variant --check-reset --repeat-envs 2
+```
+
+Rigid mesh bounds, Dynamic mesh samples and articulated functional frames use
+live native body poses with static mesh-to-body affine transforms. Pure Xform
+Dynamic assets explicitly read Fabric. USD transforms are authoritative only
+before the first physics warmup. Public RoboDojo poses remain WXYZ; native
+PhysX tensor poses are XYZW and are converted at the boundary.
+
+PBD fluid needs GPU dynamics with host readback enabled. PhysX then exposes
+native host tensor buffers while Lab 3 processes configured CUDA tensors.
+`utils/particle_readback_bridge.py` copies real readback buffers into stable
+CUDA shadows and sends actual state writes back to native host buffers. This
+bridge is installed only for particle-readback contexts; ordinary DirectGPU
+tasks keep the official Warp view. Host readback lacks native SDF and surface
+deformable tensor support: particle tasks use the explicitly labelled real
+triangle-mesh TacSL query backend described in [TacSL details](TACSL.md), and
+cloth/fluid tasks use separate contexts. These force estimates cover rigid
+colliders rather than fluid pressure.

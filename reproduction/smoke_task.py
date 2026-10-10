@@ -1,6 +1,7 @@
 """Initialize/reset one real RoboDojo task without a policy server."""
 
 import argparse
+from copy import deepcopy
 import json
 from pathlib import Path
 import sys
@@ -18,9 +19,17 @@ parser.add_argument("--output", type=Path, default=ROOT / "reproduction/task-smo
 parser.add_argument("--layout-config", default="arx_x5")
 parser.add_argument("--layout-id", type=int, default=0)
 parser.add_argument("--layout-file", type=Path)
+parser.add_argument(
+    "--replay-layout-ids", type=int, nargs="*", default=[], help="Preload and reset a finite replay cohort"
+)
+parser.add_argument("--repeat-envs", type=int, default=1, help="Construct and close multiple tasks in the same Kit app")
+parser.add_argument("--check-reset", action="store_true", help="Probe real GPU body/joint motion and exact resets")
+parser.add_argument("--probe-mass-variant", action="store_true", help="Replay a separately pooled native mass variant")
 parser.add_argument("--enable-planner", action="store_true", help="Also initialize production planners")
 add_app_launcher_args(parser, AppLauncher)
 args = parser.parse_args()
+if args.repeat_envs < 1:
+    parser.error("repeat-envs must be positive")
 args.output.unlink(missing_ok=True)
 args.enable_cameras = True
 from env.camera_manager.capture.render_sync import add_zero_delay_kit_args
@@ -60,16 +69,64 @@ try:
         ROOT, args.task, layout_config=args.layout_config, layout_id=args.layout_id, layout_file=args.layout_file
     )
     cfg.saved_layouts = [layout]
+    replay_layouts = [
+        load_task_layout(ROOT, args.task, layout_config=args.layout_config, layout_id=layout_id)
+        for layout_id in args.replay_layout_ids
+    ]
+    if args.probe_mass_variant:
+        variant_layout = deepcopy(layout)
+        category, instances = next(iter(variant_layout.get("Rigid", {}).items()), (None, []))
+        if not instances:
+            raise ValueError("Mass variant probe requires a rigid object in the canonical layout")
+        physics = instances[0].setdefault("physics", {})
+        source_mass = min(float(physics.get("mass", 0.5)), 0.5)
+        physics["mass"] = source_mass * 0.5
+        replay_layouts.append(
+            (variant_layout, {**layout_provenance, "probe": "native_mass_variant", "variant_mass_kg": physics["mass"]})
+        )
+    inventory_audit = None
+    if replay_layouts:
+        from utils.replay_inventory import build_retained_inventory
+
+        inventory, inventory_audit = build_retained_inventory([layout, *[row for row, _ in replay_layouts]])
+        cfg.retained_layout_inventory = inventory
     _, task_class = load_task_class(args.task)
+    original_cfg = deepcopy(cfg)
     env = task_class(cfg, app, seed=0)
     env.reset(seed=0)
-    scene_evidence = verify_task_scene(env.scene_manager, layout)
+    # Match EvalEnv.setup_scene: bare TaskEnv.reset stages CUDA assets offscreen.
+    env.scene_manager.apply_saved_poses(list(range(env.num_envs)))
+
+    def native_rigid_properties():
+        properties = {}
+        inactive = env.scene_manager._inactive_scene_object_names[0]
+        for name, body in env.scene_manager._rigid_and_dynamic_objects[0].items():
+            if name in inactive or not hasattr(body, "_rigid_prim_view"):
+                continue
+            view = body._rigid_prim_view
+            assert view.is_physics_handle_valid(), name
+            # Query the actual PhysX tensor view, avoiding the legacy getter's
+            # authored-USD fallback when native handles are unavailable.
+            mass = view._physics_view.get_masses().reshape(-1)
+            actual_mass = float(mass.detach().cpu().numpy()[0])
+            expected_mass = min(float(body.instance_config.get("physics", {}).get("mass", 0.5)), 0.5)
+            np.testing.assert_allclose(actual_mass, expected_mass, rtol=1e-5, atol=1e-7)
+            properties[name] = {"mass_kg": actual_mass, "expected_mass_kg": expected_mass, "prim_path": body._prim_path}
+        return properties
+
+    initial_properties = native_rigid_properties() if replay_layouts else None
+    reset_evidence = None
+    if args.check_reset:
+        from reproduction.isaac61.reset_probe import probe_motion_and_reset
+
+        reset_evidence = probe_motion_and_reset(env)
     obs_cfg = eval_cfg["observation"]
     obs_cfg["vision"].update(depth=True, intrinsic_matrix=True, extrinsic_matrix=True)
     obs = ObsManager(obs_cfg, 1, env.dt, args.task, {}, seeds_per_env=env.env_seed_list)
     obs.initialize(env)
     for _ in range(10):
         env.sim_step(render=False)
+    scene_evidence = verify_task_scene(env.scene_manager, layout)
     obs.render_for_capture()
     data = obs.get_obs()
     shapes = {}
@@ -104,15 +161,63 @@ try:
         "planner_initialized": args.enable_planner,
         "layout": layout_provenance,
         "scene": scene_evidence,
+        "motion_and_reset": reset_evidence,
+        "native_rigid_properties": initial_properties,
+    }
+    result["retained_inventory"] = inventory_audit
+    result["replayed_layouts"] = []
+    for replay_layout, replay_provenance in replay_layouts:
+        env.scene_manager.layout_manager.set_saved_layout(0, replay_layout)
+        env.reset(seed=0)
+        env.scene_manager.apply_saved_poses([0])
+        for _ in range(10):
+            env.sim_step(render=False)
+        replay_scene = verify_task_scene(env.scene_manager, replay_layout)
+        obs.render_for_capture()
+        replay_frame = obs.get_obs()[0]
+        for name, camera in replay_frame["vision"].items():
+            rgb = camera.get("rgb", camera.get("color"))
+            assert rgb is not None and rgb.any(), (replay_provenance, name)
+            assert np.any(np.isfinite(camera["depth"]) & (camera["depth"] > 0)), (replay_provenance, name)
+        result["replayed_layouts"].append(
+            {"layout": replay_provenance, "scene": replay_scene, "native_rigid_properties": native_rigid_properties()}
+        )
+    stage_ids = [str(env.sim.sim.stage.GetRootLayer().identifier)]
+    repeated_scenes = [scene_evidence]
+    env.close()
+    for repeat in range(1, args.repeat_envs):
+        env = task_class(deepcopy(original_cfg), app, seed=0)
+        env.reset(seed=0)
+        env.scene_manager.apply_saved_poses(list(range(env.num_envs)))
+        repeated_scenes.append(verify_task_scene(env.scene_manager, layout))
+        repeated_obs = ObsManager(deepcopy(obs_cfg), 1, env.dt, args.task, {}, seeds_per_env=env.env_seed_list)
+        repeated_obs.initialize(env)
+        repeated_obs.render_for_capture()
+        repeated_frame = repeated_obs.get_obs()[0]
+        assert set(repeated_frame["vision"]) == {"cam_head", "cam_left_wrist", "cam_right_wrist"}
+        for name, camera in repeated_frame["vision"].items():
+            rgb = camera.get("rgb", camera.get("color"))
+            assert rgb is not None and rgb.any(), (repeat, name)
+            assert np.any(np.isfinite(camera["depth"]) & (camera["depth"] > 0)), (repeat, name)
+        stage_ids.append(str(env.sim.sim.stage.GetRootLayer().identifier))
+        assert len(set(stage_ids)) == len(stage_ids), "Sequential tasks reused the closed USD stage"
+        env.close()
+    result["sequential_environments"] = {
+        "count": args.repeat_envs,
+        "distinct_stages": stage_ids,
+        "scenes": repeated_scenes,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result), flush=True)
-    env.close()
     success = True
 except Exception:
     import traceback
 
+    failure = {"status": "failed", "real_runtime": True, "task": args.task, "traceback": traceback.format_exc()}
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(failure, indent=2) + "\n")
+    print(json.dumps(failure), flush=True)
     traceback.print_exc()
 finally:
     app.close(wait_for_replicator=False, skip_cleanup=True, exit_code=0 if success else 1)

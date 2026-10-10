@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -22,7 +23,7 @@ import subprocess
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
-SCHEMA = "robodojo.task-scene-smoke.v2"
+SCHEMA = "robodojo.task-scene-smoke.v3"
 CAMERAS = {"head", "left_wrist", "right_wrist"}
 REQUIRED_CHECKS = {"task scene initialization", "robot reset", "RGBD observation capture"}
 OBJECT_STORAGES = {
@@ -33,6 +34,15 @@ OBJECT_STORAGES = {
     "Geometry": "geometry_objects",
     "Fluid": "fluid_objects",
 }
+PLACEMENT_SOURCES = {
+    "Rigid": "native_body_pose",
+    "Articulation": "native_body_pose",
+    "Dynamic": "live_mesh_vertices",
+    "Garment": "native_surface_nodes",
+    "Geometry": "static_geometry_pose",
+    "Fluid": "native_pbd_particle_readback",
+}
+MAX_LAYOUT_DISTANCE_M = 5.0
 GENERATED_REPORTS = {
     "reproduction/doctor.json",
     "reproduction/runtime-smoke.json",
@@ -101,6 +111,83 @@ def inventory_tasks():
     return [task["name"] for task in module.build_inventory()["tasks"] if task["runnable"]]
 
 
+def finite_vector(value, field):
+    if (
+        not isinstance(value, list)
+        or len(value) != 3
+        or any(
+            not isinstance(item, (float, int)) or isinstance(item, bool) or not math.isfinite(item) for item in value
+        )
+    ):
+        raise ValueError(f"Missing finite three-dimensional placement {field}")
+    return value
+
+
+def vector_distance(left, right):
+    return math.sqrt(sum((a - b) ** 2 for a, b in zip(left, right)))
+
+
+def check_placement_evidence(scene, source_layout, wrappers):
+    """Check real-state geometry and saved positions instead of trusting counts."""
+    if scene.get("placement_verified") is not True:
+        raise ValueError("Task objects require verified live placement after reset")
+    origin = finite_vector(scene.get("env_origin"), "environment origin")
+    placements = scene.get("live_placements", {})
+    if set(placements) != set(wrappers):
+        raise ValueError("Every actual task object must have a live placement")
+    expected = []
+    for physical_type in OBJECT_STORAGES:
+        for category, instances in source_layout.get(physical_type, {}).items():
+            for instance in instances:
+                position = finite_vector(instance.get("default_pos"), "saved layout position")
+                expected.append((physical_type, f"{category}_{instance.get('category_idx')}_", position))
+    unmatched = list(expected)
+    for path, wrapper in wrappers.items():
+        placement = placements[path]
+        physical_type = wrapper["physical_type"]
+        if placement.get("state_source") != PLACEMENT_SOURCES[physical_type]:
+            raise ValueError(f"Incorrect live placement state source at {path}")
+        world = finite_vector(placement.get("world_center"), "world center")
+        relative = finite_vector(placement.get("relative_center"), "relative center")
+        saved = finite_vector(placement.get("saved_relative_position"), "saved position")
+        if vector_distance([value - offset for value, offset in zip(world, origin)], relative) > 1e-4:
+            raise ValueError(f"Live world/environment placement frames disagree at {path}")
+        maximum = placement.get("max_distance_from_env_origin_m")
+        if not isinstance(maximum, (float, int)) or not math.isfinite(maximum) or not 0 <= maximum <= 100:
+            raise ValueError(f"Task object is offscreen/unplaced at {path}")
+        if maximum + 1e-4 < vector_distance(relative, [0, 0, 0]):
+            raise ValueError(f"Live placement maximum is smaller than its center distance at {path}")
+        measured = vector_distance(relative, saved)
+        reported = placement.get("center_distance_from_saved_position_m")
+        if not isinstance(reported, (float, int)) or not math.isfinite(reported) or abs(reported - measured) > 1e-4:
+            raise ValueError(f"Saved layout displacement evidence disagrees at {path}")
+        if measured > MAX_LAYOUT_DISTANCE_M:
+            raise ValueError(f"Task object is too far from its saved layout position at {path}")
+        match = next(
+            (
+                index
+                for index, (kind, prefix, position) in enumerate(unmatched)
+                if kind == physical_type
+                and wrapper["instance_name"].startswith(prefix)
+                and vector_distance(position, saved) < 1e-4
+            ),
+            None,
+        )
+        if match is not None:
+            unmatched.pop(match)
+        elif any(
+            kind == physical_type and wrapper["instance_name"].startswith(prefix) for kind, prefix, _ in expected
+        ) and not any(
+            kind == physical_type
+            and wrapper["instance_name"].startswith(prefix)
+            and vector_distance(position, saved) < 1e-4
+            for kind, prefix, position in expected
+        ):
+            raise ValueError(f"Live object's saved position does not belong to the canonical layout at {path}")
+    if unmatched:
+        raise ValueError("Live placements do not cover all objects in the saved task layout")
+
+
 def check_scene_evidence(evidence, task):
     """Require the recorded layout bytes and live objects, independent of status."""
     layout, scene = evidence.get("layout", {}), evidence.get("scene", {})
@@ -153,6 +240,7 @@ def check_scene_evidence(evidence, task):
         raise ValueError("Reported physical object counts disagree with actual wrapper inventory")
     if any(observed_types[category] < required for category, required in expected.items()):
         raise ValueError("Shared storage counts cannot certify the requested physical object types")
+    check_placement_evidence(scene, source_layout, wrappers)
 
 
 def check_evidence(evidence, task, env_cfg):
