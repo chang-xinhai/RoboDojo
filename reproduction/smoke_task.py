@@ -1,0 +1,84 @@
+"""Initialize/reset one real RoboDojo task without a policy server."""
+
+import argparse
+import json
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT), str(ROOT / "XPolicyLab")]
+from isaaclab.app import AppLauncher
+
+from utils.isaaclab_compat import add_app_launcher_args
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--task", default="stack_bowls")
+parser.add_argument("--env-cfg", default="arx_x5_rgbd")
+parser.add_argument("--output", type=Path, default=ROOT / "reproduction/task-smoke.json")
+add_app_launcher_args(parser, AppLauncher)
+args = parser.parse_args()
+args.enable_cameras = True
+from env.camera_manager.capture.render_sync import add_zero_delay_kit_args
+
+add_zero_delay_kit_args(args)
+launcher = AppLauncher(args)
+app = launcher.app
+success = False
+try:
+    import numpy as np
+    from omegaconf import OmegaConf
+
+    from env.observation_manager.obs_manager import ObsManager
+    from task.RoboDojo.task_registry import load_task_class
+    from utils.load_file import load_yaml
+
+    eval_cfg = load_yaml(str(ROOT / "env_cfg" / (args.env_cfg + ".yml")))
+    cfg = OmegaConf.create(
+        {
+            key: load_yaml(str(ROOT / "env_cfg" / key / (eval_cfg["config"][key] + ".yml")))
+            for key in ("sim", "scene", "camera", "robot")
+        }
+    )
+    cfg.task_env = load_yaml(str(ROOT / "task/RoboDojo/config" / (args.task + ".yml")))
+    cfg.sim.scene.num_envs = 1
+    cfg.sim.device = "cuda:0"
+    cfg.sim.seed = [0]
+    cfg.camera.default_frequency = eval_cfg["observation"]["collect_freq"]
+    _, task_class = load_task_class(args.task)
+    env = task_class(cfg, app, seed=0)
+    env.reset(seed=0)
+    obs_cfg = eval_cfg["observation"]
+    obs_cfg["vision"].update(depth=True, intrinsic_matrix=True, extrinsic_matrix=True)
+    obs = ObsManager(obs_cfg, 1, env.dt, args.task, {}, seeds_per_env=env.env_seed_list)
+    obs.initialize(env)
+    for _ in range(10):
+        env.sim_step(render=False)
+    obs.render_for_capture()
+    data = obs.get_obs()
+    shapes = {}
+    for name, camera in data[0]["vision"].items():
+        assert "depth" in camera, (name, camera.keys())
+        depth = camera["depth"]
+        assert np.any(np.isfinite(depth) & (depth > 0)), name
+        shapes[name] = {key: list(value.shape) for key, value in camera.items() if hasattr(value, "shape")}
+    assert shapes, "No camera observations"
+    result = {
+        "status": "passed",
+        "task": args.task,
+        "env_cfg": args.env_cfg,
+        "num_envs": 1,
+        "checks": ["task scene initialization", "robot reset", "RGBD observation capture"],
+        "camera_shapes": shapes,
+        "policy_evaluation": False,
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps(result), flush=True)
+    env.close()
+    success = True
+except Exception:
+    import traceback
+
+    traceback.print_exc()
+finally:
+    app.close(wait_for_replicator=False, skip_cleanup=True, exit_code=0 if success else 1)
