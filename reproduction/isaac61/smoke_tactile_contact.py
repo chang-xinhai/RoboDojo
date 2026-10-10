@@ -20,6 +20,7 @@ parser = argparse.ArgumentParser()
 add_app_launcher_args(parser, AppLauncher)
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--output", default="reproduction/isaac61/outputs/tactile-contact")
+parser.add_argument("--particle-readback", action="store_true")
 args = parser.parse_args()
 args.enable_cameras = True
 # Match Isaac Sim zero-delay rendering; baseline/contact frames must reflect
@@ -53,6 +54,14 @@ try:
     output.mkdir(parents=True, exist_ok=True)
     (output / "result.json").unlink(missing_ok=True)
     sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(dt=1 / 120, device="cuda:0", physics=PhysxCfg()))
+    if args.particle_readback:
+        from utils.particle_readback_bridge import install_particle_readback_bridge
+
+        sim.set_setting("/physics/suppressReadback", False)
+        sim.set_setting("/physics/updateToUsd", True)
+        sim.set_setting("/physics/updateParticlesToUsd", True)
+        sim.set_setting("/isaaclab/robodojo/particle_readback", True)
+        install_particle_readback_bridge(sim.physics_manager)
     sim.set_setting("/isaaclab/render/rtx_sensors", True)
     sim.add_render_callback("robodojo_tacsl_rtx_pump", lambda _: ensure_isaac_rtx_render_update(force=True))
     light = sim_utils.DomeLightCfg(intensity=1500)
@@ -244,7 +253,9 @@ try:
         "contact_mesh_body_offsets_m": probe_mesh_offsets,
         "contact_body_uniform_scales": probe_scales,
         "sdf_metric_query_validation": sdf_validation,
-        "physics": "PhysX SDF + real kinematic mesh contact",
+        "physics": "PhysX real kinematic mesh contact",
+        "contact_query_backend": manager.sensors["left"]["finger_0"][0][0].contact_query_backend,
+        "particle_readback": args.particle_readback,
         "tactile": "official IsaacLab TacSL R1.5",
         "fingers": results,
     }

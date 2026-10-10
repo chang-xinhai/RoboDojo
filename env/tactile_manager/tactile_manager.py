@@ -358,8 +358,13 @@ class TactileManager:
                             "points_pos_w": points,
                             "provenance": {
                                 "backend": "isaaclab_tacsl",
-                                "model": "official_TacSL_penalty_SDF_and_Taxim",
+                                "model": "official_TacSL_penalty_and_Taxim",
                                 "sensor": "GelSight_R1.5",
+                                "contact_query_backend": sensors[0].contact_query_backend if available else None,
+                                "contact_query_metadata": [sensor.contact_query_metadata for sensor in sensors]
+                                if available
+                                else [],
+                                "force_contact_scope": "registered_rigid_mesh_colliders" if available else None,
                                 "force_field_available": available,
                                 "force_unavailable_reason": None
                                 if available
