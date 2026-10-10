@@ -17,6 +17,9 @@ data/
 Dev/
 ignore/
 .cache/
+.venv*/
+reproduction/isaac61/*.log
+reproduction/isaac61/outputs/
 
 # Editor / agent scratch (never committed)
 .cursor/

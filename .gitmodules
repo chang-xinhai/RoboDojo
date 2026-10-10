@@ -10,3 +10,6 @@
 	path = XPolicyLab
 	url = https://github.com/XPolicyLab/XPolicyLab.git
 	branch = main
+[submodule "third_party/IsaacLab3"]
+	path = third_party/IsaacLab3
+	url = https://github.com/isaac-sim/IsaacLab.git

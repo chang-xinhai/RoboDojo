@@ -1,0 +1,11 @@
+numpy>=2
+mujoco~=3.11.0
+mujoco-warp~=3.11.0
+newton[sim]==1.5.2
+newton-usd-schemas>=0.4.1
+torch==2.11.0
+torchvision==0.26.0
+torchaudio==2.11.0
+packaging>=20,<27
+warp-lang==1.16.0
+usd-exchange==2.3.0

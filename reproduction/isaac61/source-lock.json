@@ -1,0 +1,9 @@
+{
+  "isaacsim": "6.1.0.0",
+  "isaaclab_release": "v3.0.0-EA",
+  "sources": {
+    "isaaclab": "ae37b028ea415c91ea2bc32609efcd759ed2b974",
+    "curobo": "d17b54ce32cba095c0b000c4c58777075d11de0e",
+    "xpolicylab": "53c5da5a01bc720d1cf0e6ab6ed212e8cef0eda2"
+  }
+}
