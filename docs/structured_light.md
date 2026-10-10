@@ -28,7 +28,7 @@ off and on. Ambient subtraction isolates the spatially projected light,
 including geometry, occlusion, and surface response. A shared fixed sensor gain
 preserves stereo photometric consistency. The default projection coverage
 (112 by 80 degrees) follows DepthUMI's Gemini335 proxy LUT implementation.
-Generated assets are cached in ignored `outputs/structured_light/assets`.
+Generated assets are cached in ignored `.cache/isaac61/structured_light/assets`.
 
 RTX does not model near-infrared wavelengths or NIR material reflectance here.
 The saved provenance explicitly identifies IR as an active projector radiance
@@ -37,10 +37,31 @@ claim. It does not substitute a grayscale RGB image for either stereo view.
 The dot layout and radiance scale should be validated for each task scene.
 Use `render.antialiasing_mode: Off` in the multimodal environment profile:
 temporal AA and DLSS blend the projector phases and suppress the dot pattern.
-The initial plane validation on Isaac Sim 6.0.1 used projector intensity 1500
-and saturation radiance 5500, yielding approximately 80% valid stereo depth
-at the known one-meter range for all three rigs. This is a geometry/projection
-debugging result; Isaac Sim 6.1 and moving robot capture require their own runs.
+Exact Isaac Sim `6.1.0.0` plane and rotated-rig validation passed with projector
+intensity 1500 and saturation radiance 5500. All three rigs reconstructed the
+known one-meter plane with median depth 1.0 m and 79.98–80.00% valid pixels.
+At 1.25 m with the entire rig rolled 30 degrees, median reconstructed depth
+was 1.28 m (2.4% median error), with 79.98–80.00% valid pixels. Both runs had
+zero saturated IR pixels; rendered optical-pose errors were zero for the
+unrotated rig and below `2.85e-8` for the rotated rig. These checks cover the
+native projector, stereo geometry, frame conventions, exposure, and delivered
+render-product calibration. Moving robot capture and task-specific occlusions
+require the integrated task validation.
+
+The local evidence includes complete calibration matrices, numeric reports,
+raw image/depth NPZ files, and labeled galleries:
+
+- `reproduction/isaac61/outputs/sl-plane-61/{report.json,structured_light.png}`
+- `reproduction/isaac61/outputs/sl-rotated-61/{report.json,structured_light.png}`
+
+Reproduce both checks using the isolated Kit cache configured by the wrapper:
+
+```sh
+bash reproduction/isaac61/run.sh python scripts/check_structured_light_live.py \
+  --output reproduction/isaac61/outputs/sl-plane-61
+bash reproduction/isaac61/run.sh python scripts/check_structured_light_live.py \
+  --distance 1.25 --roll-deg 30 --output reproduction/isaac61/outputs/sl-rotated-61
+```
 
 Capture freezes physics while rendering the ambient and active phases. Each
 projector is enabled separately to prevent interference between head and wrist
