@@ -1,8 +1,69 @@
 """CPU geometry and configuration checks for Omni Physics 110 surface cloth."""
 
+from copy import deepcopy
+from pathlib import PurePosixPath
 import warnings
 
 import numpy as np
+
+_ROBO_DOJO_TOP_LONG = {"00001", "00004", "00006", "00007", "00009", "00011"}
+
+
+def migrate_known_garment_physics(physics_cfg, usd_path):
+    """Explicitly migrate the bundled Top_Long particle-cloth material.
+
+    This is a named asset calibration, not a claim that dry friction replicates
+    adhesion. Unknown assets and modified nonzero adhesion still fail the strict
+    surface configuration checks. The caller records this provenance with data.
+    """
+    physics = deepcopy(physics_cfg)
+    parts = PurePosixPath(str(usd_path or "")).parts
+    known_asset = (
+        len(parts) >= 5
+        and parts[-5:-2] == ("RoboDojo", "Garment", "Top_Long")
+        and parts[-2] in _ROBO_DOJO_TOP_LONG
+        and parts[-1] == "object.usdz"
+    )
+    if not known_asset:
+        return physics, {}
+    particles = physics.setdefault("particle_material", {})
+    material = physics.setdefault("surface_material", {})
+    provenance = {
+        "asset": "/".join(parts[-5:]),
+        "model": "omniphysics_surface_xpbd_fem",
+        "benchmark_equivalent": False,
+    }
+    adhesion = particles.get("adhesion")
+    if adhesion is not None and float(adhesion) == 0.1:
+        particles["adhesion"] = 0.0
+        material.setdefault("dynamic_friction", float(particles.get("friction", 0.5)))
+        provenance["adhesion_removed"] = {
+            "legacy_adhesion": 0.1,
+            "replacement": "dry_surface_contact",
+            "dynamic_friction": material["dynamic_friction"],
+            "equivalent": False,
+        }
+        for key in ("adhesion_offset_scale", "particle_adhesion_scale", "particle_friction_scale"):
+            if key in particles:
+                provenance.setdefault("particle_contact_scaling_removed", {})[key] = particles[key]
+                particles[key] = 0.0
+    gravity_scale = particles.get("gravity_scale", 1.0)
+    if float(gravity_scale) == 2.0:
+        particles["gravity_scale"] = 1.0
+        material.setdefault("gravity_scale", 2.0)
+        provenance["gravity_scale"] = {
+            "legacy": 2.0,
+            "surface": material["gravity_scale"],
+            "implementation": "pre_step_nodal_velocity",
+        }
+    warnings.warn(
+        f"Migrating bundled garment {provenance['asset']} to FEM surface contact; "
+        "particle adhesion is removed when present and the physical models differ. "
+        "See instance_config.physics_migration for recorded changes.",
+        UserWarning,
+        stacklevel=2,
+    )
+    return physics, provenance
 
 
 def triangulate_faces(counts, indices, num_points):
@@ -42,16 +103,30 @@ def surface_material_parameters(physics_cfg, num_points):
     system = physics_cfg.get("particle_system", {})
     if physics_cfg.get("interaction_with_fluid", False):
         raise NotImplementedError("Omni Physics 110 surface cloth cannot share a PBD fluid particle system")
-    for key in ("lift", "drag", "adhesion", "cohesion", "viscosity", "surface_tension", "vorticity_confinement"):
+    for key in (
+        "lift",
+        "drag",
+        "adhesion",
+        "cohesion",
+        "viscosity",
+        "surface_tension",
+        "vorticity_confinement",
+        "adhesion_offset_scale",
+        "particle_adhesion_scale",
+        "particle_friction_scale",
+    ):
         value = particles.get(key)
         if value is not None and float(value) != 0:
             raise NotImplementedError(f"Particle cloth {key} has no surface deformable equivalent in Omni Physics 110")
     wind = system.get("wind")
     if wind is not None and np.any(np.asarray(wind) != 0):
         raise NotImplementedError("Surface deformables do not support particle cloth wind")
-    gravity_scale = float(particles.get("gravity_scale", 1.0))
-    if gravity_scale not in (0.0, 1.0):
-        raise NotImplementedError("Surface cloth gravity_scale must be 0 or 1")
+    legacy_gravity_scale = float(particles.get("gravity_scale", 1.0))
+    if legacy_gravity_scale not in (0.0, 1.0):
+        raise NotImplementedError("Legacy surface cloth gravity_scale must be 0 or 1; use an explicit FEM calibration")
+    gravity_scale = float(material.get("gravity_scale", legacy_gravity_scale))
+    if not np.isfinite(gravity_scale) or gravity_scale < 0:
+        raise ValueError("Surface cloth gravity_scale must be finite and nonnegative")
     if any(key in legacy for key in ("stretch_stiffness", "shear_stiffness", "bend_stiffness", "spring_damping")):
         warnings.warn(
             "Particle spring coefficients do not map exactly to XPBD FEM cloth. "
@@ -78,6 +153,7 @@ def surface_material_parameters(physics_cfg, num_points):
         "elasticity_damping": float(material.get("elasticity_damping", 0.005)),
         "bend_damping": float(material.get("bend_damping", 0.005)),
         "disable_gravity": gravity_scale == 0,
+        "gravity_scale": gravity_scale,
     }
     for key in ("mass", "youngs_modulus", "surface_thickness"):
         if not np.isfinite(result[key]) or result[key] <= 0:

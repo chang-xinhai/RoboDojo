@@ -1,15 +1,21 @@
 """Real XPBD FEM garments for Isaac Sim 6.1 / Omni Physics 110."""
 
+import json
+import weakref
+
+from isaacsim.core.experimental.utils.stage import get_stage_id
 from isaacsim.core.prims import SingleXFormPrim
 from isaacsim.core.utils.prims import get_prim_at_path
 from isaacsim.core.utils.stage import add_reference_to_stage, get_current_stage
 import numpy as np
 import omni.physics.tensors as tensors
+from omni.physx import get_physx_interface
 from omni.physx.scripts import deformableUtils
-from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdShade, Vt
+from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade, Vt
 import torch
 
-from utils.surface_deformable import surface_material_parameters, triangulate_faces
+from utils.physx_callback import invoke_physx_callback
+from utils.surface_deformable import migrate_known_garment_physics, surface_material_parameters, triangulate_faces
 
 
 class GarmentObject(SingleXFormPrim):
@@ -18,6 +24,9 @@ class GarmentObject(SingleXFormPrim):
     Particle cloth was removed in Sim 6.1. This uses the supported FEM solver;
     removed aerodynamics and cloth/fluid particle coupling fail explicitly.
     """
+
+    _gravity_objects = weakref.WeakSet()
+    _gravity_subscription = None
 
     def __init__(
         self, prim_path, usd_path, inst_config, env_origin, default_pos, default_ori, scale, primitive_type=None
@@ -30,7 +39,11 @@ class GarmentObject(SingleXFormPrim):
         self.primitive_type, self.instance_config = primitive_type, inst_config
         self.stage = get_current_stage()
         self.visual_cfg = inst_config.get("visual", {})
-        self.physics_cfg = inst_config.get("physics", {})
+        self.physics_cfg, self.physics_migration = migrate_known_garment_physics(
+            inst_config.get("physics", {}), usd_path
+        )
+        if self.physics_migration:
+            self.instance_config["physics_migration"] = self.physics_migration
         self.env_origin = env_origin.detach().cpu().numpy()
         self.init_pos, self.init_ori, self.init_scale = default_pos, default_ori, scale
         self._surface_view = self._surface_sim_view = None
@@ -64,12 +77,19 @@ class GarmentObject(SingleXFormPrim):
             position=np.asarray(default_pos, dtype=np.float32) + self.env_origin,
             orientation=np.asarray(default_ori),
         )
+        root_world = UsdGeom.Xformable(self.stage.GetPrimAtPath(prim_path)).ComputeLocalToWorldTransform(
+            Usd.TimeCode.Default()
+        )
+        mesh_world = UsdGeom.Xformable(self._mesh).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        self._mesh_to_root = mesh_world * root_world.GetInverse()
         if not deformableUtils.set_physics_surface_deformable_body(self.stage, Sdf.Path(self.mesh_prim_path)):
             raise RuntimeError(f"Cannot author surface deformable: {self.mesh_prim_path}")
         if not prim.ApplyAPI("PhysxSurfaceDeformableBodyAPI"):
             raise RuntimeError("PhysxSurfaceDeformableBodyAPI unavailable: Isaac Sim 6.1 required")
         self._set_attr(prim, "omniphysics:mass", self.surface_parameters["mass"])
         self._set_attr(prim, "omniphysics:deformableBodyEnabled", True)
+        if self.physics_migration:
+            prim.SetCustomDataByKey("robodojo:physicsMigration", json.dumps(self.physics_migration, sort_keys=True))
         garment, system = physics.get("garment_config", {}), physics.get("particle_system", {})
         for attr, value in {
             "selfCollision": garment.get("self_collision", True),
@@ -149,16 +169,69 @@ class GarmentObject(SingleXFormPrim):
 
     def initialize(self):
         # Lab 3's global view uses Warp. Keep this wrapper's frontend explicitly torch.
-        self._surface_sim_view = tensors.create_simulation_view("torch")
+        self._surface_sim_view = tensors.create_simulation_view(
+            "torch", stage_id=get_stage_id(self.stage), backend="physx"
+        )
         self._surface_sim_view.set_subspace_roots("/")
         self._surface_view = self._surface_sim_view.create_surface_deformable_body_view(self.mesh_prim_path)
-        if self._surface_view.count != 1 or not self._surface_view.check():
-            raise RuntimeError(f"No live surface deformable at {self.mesh_prim_path}")
+        if self._surface_view.count != 1:
+            raise RuntimeError(f"No unique live surface deformable at {self.mesh_prim_path}")
+        # The official Lab 3 wrapper warns on check() instead of rejecting a
+        # view. Record it; actual buffer access and motion tests establish validity.
+        self.tensor_view_check_on_creation = bool(self._surface_view.check())
         self.initial_points_positions = self._surface_view.get_simulation_nodal_positions().clone()
+        if self.surface_parameters["gravity_scale"] not in (0.0, 1.0):
+            scenes = [UsdPhysics.Scene(p) for p in self.stage.Traverse() if p.IsA(UsdPhysics.Scene)]
+            if len(scenes) != 1:
+                raise RuntimeError("Garment gravity scaling requires one unambiguous physics scene")
+            self._gravity_scene = scenes[0]
+            type(self)._gravity_objects.add(self)
+            if type(self)._gravity_subscription is None:
+                type(self)._gravity_subscription = get_physx_interface().subscribe_physics_on_step_events(
+                    type(self)._apply_scaled_gravity, pre_step=True, order=50
+                )
+
+    @classmethod
+    def _apply_scaled_gravity(cls, dt):
+        # Apply only the additional acceleration; PhysX integrates normal scene
+        # gravity itself. Using actual nodal velocities retains real collision,
+        # elastic constraints and rendering, unlike moving USD geometry.
+        for garment in tuple(cls._gravity_objects):
+            invoke_physx_callback(garment._apply_gravity_velocity_delta, dt)
+
+    def _apply_gravity_velocity_delta(self, dt):
+        direction = np.asarray(self._gravity_scene.GetGravityDirectionAttr().Get(), dtype=float)
+        magnitude = float(self._gravity_scene.GetGravityMagnitudeAttr().Get())
+        norm = np.linalg.norm(direction)
+        if not np.isfinite(magnitude) or not np.isfinite(norm) or norm == 0:
+            raise ValueError("Garment gravity scaling requires a finite nonzero scene gravity direction")
+        velocities = self._surface_view.get_simulation_nodal_velocities()
+        delta = (self.surface_parameters["gravity_scale"] - 1) * magnitude * direction / norm * float(dt)
+        delta = torch.as_tensor(delta, device=velocities.device, dtype=velocities.dtype)
+        indices = torch.zeros(1, device=velocities.device, dtype=torch.int32)
+        self._surface_view.set_simulation_nodal_velocities(velocities + delta, indices)
+
+    def close(self):
+        # Unregister before deleting the USD body: a Python reference retained
+        # by diagnostics must never cause writes into a destroyed native view.
+        type(self)._gravity_objects.discard(self)
+        self._surface_view = self._surface_sim_view = None
 
     def _world_points(self, points):
         transform = UsdGeom.Xformable(self._mesh).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
         return np.asarray([transform.Transform(Gf.Vec3d(*map(float, p))) for p in points], dtype=np.float32)
+
+    def _world_reset_points(self):
+        # Runtime edits of a surface body's USD xform destroy/recreate the
+        # underlying PhysX body and invalidate tensor views. Teleport nodes, as
+        # the official DeformableObject reset API does, keeping USD xforms fixed.
+        orientation = np.asarray(self.init_ori, dtype=float)
+        target = Gf.Transform()
+        target.SetTranslation(Gf.Vec3d(*map(float, np.asarray(self.init_pos) + self.env_origin)))
+        target.SetRotation(Gf.Rotation(Gf.Quatd(float(orientation[0]), Gf.Vec3d(*map(float, orientation[1:])))))
+        target.SetScale(Gf.Vec3d(*map(float, self.init_scale)))
+        transform = self._mesh_to_root * target.GetMatrix()
+        return np.asarray([transform.Transform(Gf.Vec3d(*map(float, p))) for p in self._rest_points], dtype=np.float32)
 
     def reset(self):
         if self._surface_view is None:
@@ -166,18 +239,18 @@ class GarmentObject(SingleXFormPrim):
             self._mesh.GetVelocitiesAttr().Set(Vt.Vec3fArray.FromNumpy(np.zeros_like(self._rest_points)))
             return
         template = self._surface_view.get_simulation_nodal_positions()
-        points = torch.as_tensor(
-            self._world_points(self._rest_points), device=template.device, dtype=template.dtype
-        ).unsqueeze(0)
+        points = torch.as_tensor(self._world_reset_points(), device=template.device, dtype=template.dtype).unsqueeze(0)
         indices = torch.zeros(1, device=template.device, dtype=torch.int32)
         self._surface_view.set_simulation_nodal_positions(points, indices)
         self._surface_view.set_simulation_nodal_velocities(torch.zeros_like(points), indices)
 
     def apply_saved_pose(self):
-        self.set_world_pose(
-            np.asarray(self.init_pos, dtype=np.float32) + self.env_origin, np.asarray(self.init_ori, dtype=np.float32)
-        )
-        self.set_local_scale(np.asarray(self.init_scale, dtype=np.float32))
+        if self._surface_view is None:
+            self.set_world_pose(
+                np.asarray(self.init_pos, dtype=np.float32) + self.env_origin,
+                np.asarray(self.init_ori, dtype=np.float32),
+            )
+            self.set_local_scale(np.asarray(self.init_scale, dtype=np.float32))
         self.reset()
 
     def sample_mesh_vertices(self):

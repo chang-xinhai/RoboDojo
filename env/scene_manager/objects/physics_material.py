@@ -4,7 +4,7 @@ from typing import Any, Dict, Literal
 
 import carb
 import isaacsim.core.utils.stage as stage_utils
-from pxr import PhysxSchema, Usd, UsdPhysics, UsdShade
+from pxr import PhysxSchema, UsdPhysics, UsdShade
 
 from utils.usd_schema import safe_set_attribute_on_schema
 

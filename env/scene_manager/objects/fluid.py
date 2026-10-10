@@ -1,18 +1,22 @@
 import os
+import weakref
 
 import carb
 from isaacsim.core.prims import SingleXFormPrim
 from isaacsim.core.utils.prims import delete_prim, is_prim_path_valid
 from isaacsim.core.utils.stage import add_reference_to_stage, get_current_stage
 from isaacsim.core.utils.string import find_unique_string_name
-from isaacsim.replicator.behavior.utils.scene_utils import create_mdl_material
 import numpy as np
 from omegaconf import DictConfig, ListConfig
 import omni.kit.commands
+from omni.physx import get_physx_interface
 from omni.physx.scripts import particleUtils, physicsUtils
-from pxr import Gf, PhysxSchema, Sdf, UsdGeom, Vt
+from pxr import Gf, PhysxSchema, Sdf, UsdGeom, UsdPhysics, Vt
 from scipy.spatial import Delaunay
 import torch
+
+from utils.mdl_material import create_mdl_material
+from utils.physx_callback import invoke_physx_callback
 
 
 class FluidObject:
@@ -20,6 +24,16 @@ class FluidObject:
     FluidObject class for simulating fluid particles in Isaac Sim.
     Manages fluid particle systems, containers, materials, and physics properties.
     """
+
+    _live_objects = weakref.WeakSet()
+    _usd_sync_subscription = None
+
+    @classmethod
+    def _sync_solver_output(cls, _dt=None):
+        if cls._live_objects:
+            # Fabric does not publish PBD point-instancer positions to USD.
+            # Flush actual solver state once per tick for rendering and rewards.
+            invoke_physx_callback(get_physx_interface().update_transformations, False, True, True)
 
     def __init__(
         self,
@@ -104,6 +118,18 @@ class FluidObject:
         else:
             prim = self.stage.GetPrimAtPath(self.particle_system_path)
             self.particle_system = PhysxSchema.PhysxParticleSystem(prim)
+
+        # A particle system must own the active physics scene explicitly.
+        owner = inst_particle_system_cfg.get("simulation_owner")
+        if not owner:
+            scenes = [prim.GetPath() for prim in self.stage.Traverse() if prim.IsA(UsdPhysics.Scene)]
+            if len(scenes) != 1:
+                raise ValueError(
+                    "Fluid requires physics.particle_system.simulation_owner when there is not exactly one scene"
+                )
+            owner = scenes[0]
+        self.particle_system.CreateSimulationOwnerRel().SetTargets([Sdf.Path(owner)])
+        self.particle_system.CreateParticleSystemEnabledAttr().Set(True)
 
         # Configure particle system properties
         self.particle_system.CreateParticleContactOffsetAttr().Set(
@@ -243,7 +269,21 @@ class FluidObject:
             )
 
     def initialize(self):
+        # Sim/Lab Fabric setup can reset these flags after object construction.
+        # PBD particles have no tensor view in Omni Physics 110; synchronize their
+        # genuine solver positions to USD for capture and rewards.
+        carb.settings.get_settings().set_bool("/physics/updateToUsd", True)
+        carb.settings.get_settings().set_bool("/physics/updateParticlesToUsd", True)
+        type(self)._live_objects.add(self)
+        if type(self)._usd_sync_subscription is None:
+            type(self)._usd_sync_subscription = get_physx_interface().subscribe_physics_on_step_events(
+                type(self)._sync_solver_output, False, 100
+            )
+        self._sync_solver_output()
         self.init_position, _, _ = self.get_particle_positions()
+
+    def close(self):
+        type(self)._live_objects.discard(self)
 
     def apply_saved_pose(self):
         self._root_transform.set_world_pose(
@@ -362,8 +402,7 @@ def generate_particles_in_convex_mesh(vertices: np.ndarray, sphere_diameter: flo
     z_vals = np.arange(min_bound[2], max_bound[2] + epsilon, sphere_diameter)
 
     if x_vals.size == 0 or y_vals.size == 0 or z_vals.size == 0:
-        print("Warning: Empty dimension range for particle grid. Returning empty.")
-        return [], []
+        raise ValueError("Fluid particle spacing produces an empty volume grid")
 
     if x_vals.size * y_vals.size * z_vals.size > 5_000_000:
         raise ValueError("Fluid particle grid exceeds 5 million samples; increase spacing")
@@ -371,6 +410,8 @@ def generate_particles_in_convex_mesh(vertices: np.ndarray, sphere_diameter: flo
 
     inside_mask = hull.find_simplex(samples, tol=1e-6) >= 0
     inside_points = samples[inside_mask]
+    if len(inside_points) == 0:
+        raise ValueError("Fluid particle spacing produces no interior particles; decrease spacing")
 
     velocity = np.zeros_like(inside_points)
 

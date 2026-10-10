@@ -125,7 +125,7 @@ class SceneManager:
                 # Create dynamic and articulation objects for CUDA
                 self.spawn_scene_objects(
                     env_id=env_idx,
-                    exclude_types=list(set(self.spawnable_object_types) - {"rigid", "articulation"}),
+                    exclude_types=list(set(self.spawnable_object_types) - {"rigid", "dynamic", "articulation"}),
                 )
             else:
                 self.spawn_scene_objects(
@@ -242,8 +242,8 @@ class SceneManager:
         if self.device.type == "cuda":
             self.relocate_stale_objects(env_id, ["rigid", "articulation"])
             # Clear existing objects (based on exclude_types)
-            self.clear_scene_objects(env_id, exclude_types=["rigid", "articulation"])
-            self.spawn_scene_objects(env_id, exclude_types=["rigid", "articulation"])
+            self.clear_scene_objects(env_id, exclude_types=["rigid", "dynamic", "articulation"])
+            self.spawn_scene_objects(env_id, exclude_types=["rigid", "dynamic", "articulation"])
         else:
             self.relocate_stale_objects(env_id, ["articulation"])
             # Clear existing objects (based on exclude_types)
@@ -660,6 +660,8 @@ class SceneManager:
         Args:
             obj: Object instance to delete
         """
+        if isinstance(obj, (GarmentObject, FluidObject)):
+            obj.close()
         if self.device.type == "cuda":
             if isinstance(obj, GarmentObject):
                 if hasattr(obj, "usd_prim_path") and is_prim_path_valid(obj.usd_prim_path):
