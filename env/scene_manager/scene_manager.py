@@ -181,6 +181,10 @@ class SceneManager:
             self._set_env_seed(env_id)
             self.reload_env_scene(env_id)
 
+        if self.pending_initialization:
+            # Newly authored surface deformables/PBD systems must be parsed by
+            # PhysX before creating tensor views against them.
+            self.sim.sim_step(render=False)
         for obj in self.pending_initialization:
             obj.initialize()
         self.pending_initialization.clear()
@@ -314,24 +318,13 @@ class SceneManager:
         Returns:
             Created object instance or None
         """
-        # Get object type first to check if it should be disabled
+        # Particle fluids and surface cloth are GPU PhysX features. Never omit
+        # requested physics objects silently, including on CPU/fabric settings.
         obj_type = inst_cfg.get("physics", {}).get("type", "rigid")
-        # Check if garment is disabled due to cpu+use_fabric combination
-        # Do this BEFORE creating any primitive shapes to avoid creating orphaned primitives
-        if self.device.type == "cpu" and self.use_fabric:
-            if obj_type in ["garment", "articulation"]:
-                print(
-                    f"Warning: {obj_type.capitalize()} objects are disabled when device='cpu' and use_fabric=True. "
-                    f"Skipping object creation at '{prim_path}'."
-                )
-                return None
-        if self.device.type.startswith("cuda"):
-            if obj_type in ["fluid"]:
-                print(
-                    f"Warning: {obj_type.capitalize()} objects are disabled when using CUDA device. "
-                    f"Skipping object creation at '{prim_path}'."
-                )
-                return None
+        if self.device.type == "cpu" and obj_type in ("garment", "fluid"):
+            raise NotImplementedError(
+                f"{obj_type.capitalize()} object '{prim_path}' requires CUDA PhysX GPU dynamics in Isaac Sim 6.1."
+            )
 
         usd_path = None
         # Handle primitive shapes

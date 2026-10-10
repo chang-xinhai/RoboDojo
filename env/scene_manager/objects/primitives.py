@@ -24,7 +24,7 @@ class CubeMesh:
             v_patches=resolution,
             w_patches=resolution,
         )
-        skin_mesh = stage_utils.get_current_stage().GetPrimAtPath(prim_path)
+        skin_mesh = UsdGeom.Mesh.Get(stage_utils.get_current_stage(), prim_path)
         physicsUtils.setup_transform_as_scale_orient_translate(skin_mesh)
         physicsUtils.set_or_add_translate_op(skin_mesh, position)
         # The created cube is 1x1x1, so we apply the scale directly.
@@ -50,7 +50,7 @@ class PlaneMesh:
             u_patches=dimx,
             v_patches=dimy,
         )
-        plane_mesh = stage_utils.get_current_stage().GetPrimAtPath(prim_path)
+        plane_mesh = UsdGeom.Mesh.Get(stage_utils.get_current_stage(), prim_path)
         physicsUtils.setup_transform_as_scale_orient_translate(plane_mesh)
         physicsUtils.set_or_add_translate_op(plane_mesh, position)
         # Scale the 1x1 plane to the desired final dimensions
@@ -77,7 +77,7 @@ class ConeMesh:
             prim_path=prim_path,
             u_patches=resolution,
         )
-        skin_mesh = stage_utils.get_current_stage().GetPrimAtPath(prim_path)
+        skin_mesh = UsdGeom.Mesh.Get(stage_utils.get_current_stage(), prim_path)
         physicsUtils.setup_transform_as_scale_orient_translate(skin_mesh)
         physicsUtils.set_or_add_translate_op(skin_mesh, position)
         # Scale the unit cone to the desired dimensions
@@ -104,7 +104,7 @@ class DiskMesh:
             prim_path=prim_path,
             u_patches=resolution,
         )
-        skin_mesh = stage_utils.get_current_stage().GetPrimAtPath(prim_path)
+        skin_mesh = UsdGeom.Mesh.Get(stage_utils.get_current_stage(), prim_path)
         physicsUtils.setup_transform_as_scale_orient_translate(skin_mesh)
         physicsUtils.set_or_add_translate_op(skin_mesh, position)
         # Scale the unit disk to the desired radius
@@ -130,7 +130,7 @@ class CylinderMesh:
             prim_path=prim_path,
             u_patches=resolution,
         )
-        skin_mesh = stage_utils.get_current_stage().GetPrimAtPath(prim_path)
+        skin_mesh = UsdGeom.Mesh.Get(stage_utils.get_current_stage(), prim_path)
         physicsUtils.setup_transform_as_scale_orient_translate(skin_mesh)
         physicsUtils.set_or_add_translate_op(skin_mesh, position)
         # Scale the unit cylinder to the desired dimensions
@@ -156,7 +156,7 @@ class SphereMesh:
             u_patches=resolution * 3,
             v_patches=resolution * 2,
         )
-        skin_mesh = stage_utils.get_current_stage().GetPrimAtPath(prim_path)
+        skin_mesh = UsdGeom.Mesh.Get(stage_utils.get_current_stage(), prim_path)
         physicsUtils.setup_transform_as_scale_orient_translate(skin_mesh)
         physicsUtils.set_or_add_translate_op(skin_mesh, position)
         # Scale the unit sphere to the desired radius
@@ -184,7 +184,7 @@ class TorusMesh:
             u_patches=resolution * 4,
             v_patches=resolution * 2,
         )
-        skin_mesh = stage_utils.get_current_stage().GetPrimAtPath(prim_path)
+        skin_mesh = UsdGeom.Mesh.Get(stage_utils.get_current_stage(), prim_path)
         physicsUtils.setup_transform_as_scale_orient_translate(skin_mesh)
         physicsUtils.set_or_add_translate_op(skin_mesh, position)
         # We perform a uniform scale based on the major_radius.
@@ -209,8 +209,8 @@ class CapsuleMesh:
         resolution: int = 16,
     ):
         current_stage = stage_utils.get_current_stage()
-        skin_mesh = stage_utils.get_current_stage().GetPrimAtPath(prim_path)
-        if not skin_mesh.GetPath():
+        skin_mesh = UsdGeom.Mesh.Get(stage_utils.get_current_stage(), prim_path)
+        if not skin_mesh:
             skin_mesh = UsdGeom.Mesh.Define(current_stage, prim_path)
 
         tri_points, tri_indices = CapsuleMesh._create_triangle_mesh(height=height, radius=radius, resolution=resolution)

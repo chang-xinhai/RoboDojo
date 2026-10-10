@@ -1,6 +1,7 @@
 import os
 
 import carb
+from isaacsim.core.prims import SingleXFormPrim
 from isaacsim.core.utils.prims import delete_prim, is_prim_path_valid
 from isaacsim.core.utils.stage import add_reference_to_stage, get_current_stage
 from isaacsim.core.utils.string import find_unique_string_name
@@ -38,6 +39,11 @@ class FluidObject:
             usd_path: Path to the USD asset file for this fluid
             config: Configuration dictionary containing fluid properties
         """
+        # Omni Physics 110 removed cloth aerodynamics from the PBD helper API.
+        for key in ("lift", "drag"):
+            value = inst_config.get("physics", {}).get("particle_material", {}).get(key)
+            if value is not None and float(value) != 0:
+                raise NotImplementedError(f"PBD fluid {key} is unavailable in Isaac Sim 6.1")
         # Enable CPU fluid updates
         carb.settings.get_settings().set_bool("/physics/updateToUsd", True)
         carb.settings.get_settings().set_bool("/physics/updateParticlesToUsd", True)
@@ -70,6 +76,15 @@ class FluidObject:
         self.init_scale = scale
 
         add_reference_to_stage(usd_path=usd_path, prim_path=prim_path)
+        # Set world pose on the root; particle positions remain in its local frame.
+        # This correctly handles an environment parent with its own translation.
+        self._root_transform = SingleXFormPrim(
+            prim_path=prim_path,
+            name=prim_path,
+            position=np.asarray(self.init_pos, dtype=np.float32) + self.env_origin,
+            orientation=np.asarray(self.init_ori, dtype=np.float32),
+            scale=np.asarray(self.init_scale, dtype=np.float32),
+        )
 
         # --- 4. Particle System Setup ---
         inst_particle_system_cfg = self.physics_cfg.get("particle_system", {})
@@ -148,21 +163,13 @@ class FluidObject:
 
         self.point_instancer = UsdGeom.PointInstancer.Get(self.stage, self.particle_point_instancer_path)
 
-        init_scale_array = np.array(self.init_scale, dtype=np.float32)
-        combined_scale = init_scale_array * self.visual_scale
-
+        # visual_scale is already included in cloud_points. Instance scale and
+        # world pose live on the parent root, so do not apply either twice.
         physicsUtils.set_or_add_scale_orient_translate(
             self.point_instancer,
-            translate=Gf.Vec3f([float(v) for v in self.init_pos]),
-            orient=Gf.Quatf(
-                float(self.init_ori[0]),
-                Gf.Vec3f(
-                    float(self.init_ori[1]),
-                    float(self.init_ori[2]),
-                    float(self.init_ori[3]),
-                ),
-            ),
-            scale=Gf.Vec3f([float(v) for v in combined_scale]),
+            translate=Gf.Vec3f(0.0),
+            orient=Gf.Quatf(1.0),
+            scale=Gf.Vec3f(1.0),
         )
 
         proto_path = self.particle_point_instancer_path.AppendChild("particlePrototype0")
@@ -209,8 +216,6 @@ class FluidObject:
             cohesion=inst_particle_material_cfg.get("cohesion"),
             particle_adhesion_scale=inst_particle_material_cfg.get("particle_adhesion_scale"),
             particle_friction_scale=inst_particle_material_cfg.get("particle_friction_scale"),
-            drag=inst_particle_material_cfg.get("drag"),
-            lift=inst_particle_material_cfg.get("lift"),
             friction=inst_particle_material_cfg.get("friction"),
             damping=inst_particle_material_cfg.get("damping"),
             gravity_scale=inst_particle_material_cfg.get("gravity_scale", 1.0),
@@ -241,7 +246,15 @@ class FluidObject:
         self.init_position, _, _ = self.get_particle_positions()
 
     def apply_saved_pose(self):
+        self._root_transform.set_world_pose(
+            np.asarray(self.init_pos, dtype=np.float32) + self.env_origin,
+            np.asarray(self.init_ori, dtype=np.float32),
+        )
+        self._root_transform.set_local_scale(np.asarray(self.init_scale, dtype=np.float32))
         self.set_particle_positions(self.init_position)
+        self.point_instancer.GetVelocitiesAttr().Set(
+            Vt.Vec3fArray.FromNumpy(np.zeros_like(self.init_position, dtype=np.float32))
+        )
 
     def get_particle_positions(self):
         """
@@ -327,24 +340,21 @@ def generate_particles_in_convex_mesh(vertices: np.ndarray, sphere_diameter: flo
     Returns:
         List of particle positions and velocities (zero-initialized)
     """
-    if not isinstance(vertices, np.ndarray):
-        vertices = np.array(vertices)
-
-    if vertices.shape[0] < 4:
-        print("Warning: Need at least 4 vertices for Delaunay triangulation. Returning empty.")
-        return [], []
+    vertices = np.asarray(vertices, dtype=np.float64)
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or len(vertices) < 4 or not np.isfinite(vertices).all():
+        raise ValueError("Fluid requires at least four finite vertices with shape (N, 3)")
+    if not np.isfinite(sphere_diameter) or sphere_diameter <= 0:
+        raise ValueError("Fluid particle spacing must be finite and positive")
+    if np.linalg.matrix_rank(vertices - vertices.mean(axis=0)) < 3:
+        raise ValueError("Fluid source mesh must enclose a nonzero volume")
 
     try:
         min_bound = np.min(vertices, axis=0)
         max_bound = np.max(vertices, axis=0)
 
-        if np.linalg.matrix_rank(vertices) < 3:
-            vertices += np.random.rand(*vertices.shape) * 1e-6
-
         hull = Delaunay(vertices)
     except Exception as e:
-        print(f"Error during Delaunay triangulation: {e}. Vertices shape: {vertices.shape}. Returning empty.")
-        return [], []
+        raise ValueError("Cannot construct convex fluid source volume") from e
 
     epsilon = sphere_diameter * 0.01
     x_vals = np.arange(min_bound[0], max_bound[0] + epsilon, sphere_diameter)
@@ -355,6 +365,8 @@ def generate_particles_in_convex_mesh(vertices: np.ndarray, sphere_diameter: flo
         print("Warning: Empty dimension range for particle grid. Returning empty.")
         return [], []
 
+    if x_vals.size * y_vals.size * z_vals.size > 5_000_000:
+        raise ValueError("Fluid particle grid exceeds 5 million samples; increase spacing")
     samples = np.stack(np.meshgrid(x_vals, y_vals, z_vals, indexing="ij"), axis=-1).reshape(-1, 3)
 
     inside_mask = hull.find_simplex(samples, tol=1e-6) >= 0
