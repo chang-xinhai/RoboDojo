@@ -16,6 +16,7 @@ from env.observation_manager.obs_manager import ObsManager
 from env.seed_manager.seed_manager import SeedManager
 from utils.cluttered_generator import UnStableError
 from utils.pipeline_utils import get_robot_action_dim_info
+from utils.replay_inventory import preload_replay_inventory, replay_seed_config
 from utils.save_file import VideoStreamWriter, format_video_saved_message, save_json
 
 
@@ -135,7 +136,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             }
 
             self.scene_manager.layout_manager.replay = True
-            self.seed_manager = SeedManager(config.eval_cfg)
+            self.seed_manager = SeedManager(replay_seed_config(config.eval_cfg))
 
             completed_layout_ids: list[int] = []
             abandoned_layout_ids: list[int] = []
@@ -173,6 +174,11 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 completed_layout_ids=completed_layout_ids,
                 abandoned_layout_ids=abandoned_layout_ids,
             )
+            # BaseEnv defers native initialization until first reset. Preload
+            # every remaining replay asset variant while CUDA topology and
+            # TacSL contact views can still be authored safely.
+            self.replay_inventory = preload_replay_inventory(self.seed_manager, self.scene_manager)
+            self.eval_result["replay_inventory"] = self.replay_inventory
 
             self.deploy_cfg = config.deploy_cfg
             self.port = self.deploy_cfg.get("port", None)
@@ -203,7 +209,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
 
         def _post_setup_scene(self, sim):
             super()._post_setup_scene(sim)
-            self.obs_manager.initialize(self)
+            # The first native scene can contain the whole replay pool. Bind
+            # observations only after reset has selected the active layout.
 
         def reset(self, seed=None, options=None):
             seed = list(seed)
@@ -236,7 +243,10 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                     self.current_env_seed_map[idx] = seed[idx]
 
             super().reset(seed=self.env_seeds, options=options)
-            self.obs_manager.reset()  # Reset observation manager for the next episode
+            # Language templates can depend on the current model/category and
+            # must be regenerated after pooled labels become active metadata.
+            self.obs_manager.initialize(self)
+            self.obs_manager.reset()
             self.setup_scene()
             self.robot_manager.set_origin_endpose()
             self.robot_manager.set_robot_init_state()
@@ -701,6 +711,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 "abandoned_layout_ids": sorted(int(s) for s in self.abandoned_seeds),
                 "details": self.eval_result.get("details", {}),
                 "restart_count": int(restart_count),
+                "replay_inventory": self.replay_inventory,
             }
             tmp_path = manifest_path + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as fp:

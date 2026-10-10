@@ -20,6 +20,7 @@ from env.seeding import seed_everywhere
 from utils.cluttered_generator import ClutteredGenerator
 from utils.load_file import *
 from utils.path import deep_resolve_paths, get_mdl_paths_from_folder, get_usd_paths_from_folder, resolve_path
+from utils.replay_inventory import retained_asset_key
 from utils.transformer import *
 from utils.transformer import _get_link_matrix_from_usd
 
@@ -148,18 +149,39 @@ class LayoutManager:
             "Ground": [ClutteredGenerator() for _ in range(self.num_envs)],
         }
 
-    def load_saved_layout(self, env_idx):
+    def load_saved_layout(self, env_idx, reuse_object_paths=None, reuse_object_types=()):
         self._set_env_seed(env_idx)
         env_config = deepcopy(self.saved_layouts[env_idx])
         if env_config is None:
             return None
+        # Retained CUDA bodies/articulations cannot acquire a new model or a
+        # larger inventory after native handles and TacSL topology are ready.
+        # Check before clearing metadata so an unsupported reset stays explicit.
+        requested = {}
+        for physical_type in reuse_object_types:
+            for category, instances in env_config.get(physical_type.capitalize(), {}).items():
+                for instance in instances:
+                    key = retained_asset_key(physical_type, category, instance)
+                    requested[key] = requested.get(key, 0) + 1
+        for key, count in requested.items():
+            available = len((reuse_object_paths or {}).get(key, []))
+            if count > available:
+                raise RuntimeError(
+                    f"Saved layout requires {count} {key} objects but the active native scene has {available}; "
+                    "preload this physical variant before the first reset or construct a fresh TaskEnv"
+                )
         self.clear_layout_state([env_idx])
         for key, value in env_config.items():
             if key in ["Rigid", "Dynamic", "Geometry", "Articulation", "Garment", "Fluid"]:
                 for cat, inst_list in value.items():
                     for inst in inst_list:
                         cat_idx = inst.get("category_idx", None)
-                        prim_path, inst_name = self._generate_object_paths(env_idx, cat, cat_idx, type=key.lower())
+                        asset_key = retained_asset_key(key, cat, inst) if key.lower() in reuse_object_types else None
+                        retained = (reuse_object_paths or {}).get(asset_key, [])
+                        if retained:
+                            prim_path, inst_name = retained.pop(0)
+                        else:
+                            prim_path, inst_name = self._generate_object_paths(env_idx, cat, cat_idx, type=key.lower())
                         if key in ["Rigid", "Dynamic", "Garment", "Articulation", "Geometry", "Fluid"]:
                             if "type" in inst and inst["type"] == "cluttered":
                                 usd_path = f"{OBJECTS_PATH}/Clutter/{cat}/{cat_idx:05d}/object.usdz"

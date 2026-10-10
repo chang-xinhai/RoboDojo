@@ -25,6 +25,7 @@ from env.scene_manager.objects.room import Room
 from env.scene_manager.objects.table import Table
 from env.seeding import seed_everywhere
 from utils.path import *
+from utils.replay_inventory import retained_asset_key
 
 
 class SceneManager:
@@ -77,6 +78,9 @@ class SceneManager:
         self._garment_objects: List[Dict[str, GarmentObject]] = [{} for _ in range(num_envs)]
         self._geometry_objects: List[Dict[str, GeometryObject]] = [{} for _ in range(num_envs)]
         self._fluid_objects: List[Dict[str, FluidObject]] = [{} for _ in range(num_envs)]
+        self._inactive_scene_object_names = [set() for _ in range(num_envs)]
+        # Evaluators may preload a finite replay cohort before the first warmup.
+        self.retained_layout_inventory = None
 
         # Rooms and lights remain environment-specific
         self._rooms: List[Room | None] = [None] * num_envs
@@ -113,11 +117,30 @@ class SceneManager:
     def initialize(self, sim: IsaacRLEnv):
         """Initialize the scene manager."""
         self.sim = sim
+        # Constructors can precede stage attachment. Refresh from the active
+        # SimulationContext, especially when one Kit app runs multiple tasks.
+        self.stage = sim.sim.stage
         self.env_origins = self.sim.scene.env_origins
 
         self._setup_background()
         for env_idx in range(self.num_envs):
-            self.config[f"env{env_idx}"] = self.layout_manager.load_saved_layout(env_idx)
+            if getattr(self, "retained_layout_inventory", None):
+                active_layout = self.layout_manager.saved_layouts[env_idx]
+                if active_layout is None:
+                    raise RuntimeError("Retained replay inventory requires the current saved layout before first reset")
+                preload_layout = deepcopy(active_layout)
+                for kind in ("Rigid", "Dynamic", "Articulation"):
+                    # CPU only retains articulations; ordinary rigid/dynamic
+                    # objects are recreated there by the established pipeline.
+                    if self.device.type == "cuda" or kind == "Articulation":
+                        preload_layout[kind] = deepcopy(self.retained_layout_inventory.get(kind, {}))
+                self.layout_manager.set_saved_layout(env_idx, preload_layout)
+                try:
+                    self.config[f"env{env_idx}"] = self.layout_manager.load_saved_layout(env_idx)
+                finally:
+                    self.layout_manager.set_saved_layout(env_idx, active_layout)
+            else:
+                self.config[f"env{env_idx}"] = self.layout_manager.load_saved_layout(env_idx)
 
         for env_idx in range(self.num_envs):
             self._set_env_seed(env_idx)
@@ -133,7 +156,9 @@ class SceneManager:
                     exclude_types=list(set(self.spawnable_object_types) - {"articulation"}),
                 )
 
-        self.setup_scene = True
+        # A preloaded cohort is a native asset pool, not the active episode.
+        # Its first reset must restore current labels/poses and park unused assets.
+        self.setup_scene = not bool(getattr(self, "retained_layout_inventory", None))
 
     def post_init(self):
         """Post-initialization logic.
@@ -219,7 +244,8 @@ class SceneManager:
                 self._fluid_objects[env_idx],
             ]:
                 for obj in obj_dict.values():
-                    obj.apply_saved_pose()
+                    if getattr(obj, "instance_name", None) not in self._inactive_scene_object_names[env_idx]:
+                        obj.apply_saved_pose()
 
         for _ in range(20):
             self.sim.sim_step(render=False)
@@ -232,7 +258,40 @@ class SceneManager:
             env_id: ID of the environment to reset
         """
         if not self.setup_scene:
-            self.config[f"env{env_id}"] = self.layout_manager.load_saved_layout(env_id)
+            # CUDA bodies survive a reset. Reuse their original USD paths so
+            # refreshed labels/functional metadata refer to the live objects.
+            retained = {}
+            collections = [("articulation", self._articulation_objects[env_id])]
+            if self.device.type == "cuda":
+                collections += [("rigid", self._rigid_and_dynamic_objects[env_id])]
+            for kind, objects in collections:
+                for obj in objects.values():
+                    actual_kind = "dynamic" if isinstance(obj, DynamicObject) else kind
+                    model, _ = LayoutManager.decode_inst_name(obj.instance_name)
+                    asset_key = retained_asset_key(actual_kind, model, obj.instance_config)
+                    retained.setdefault(asset_key, []).append((obj._prim_path, obj.instance_name))
+            retained_types = ("rigid", "dynamic", "articulation") if self.device.type == "cuda" else ("articulation",)
+            self.config[f"env{env_id}"] = self.layout_manager.load_saved_layout(
+                env_id, reuse_object_paths=retained, reuse_object_types=retained_types
+            )
+            active = self.layout_manager.instance_type_by_env[env_id]
+            self._inactive_scene_object_names[env_id] = {
+                name for _, objects in collections for name in objects if name not in active
+            }
+            for kind, objects in collections:
+                physical_kinds = ("Rigid", "Dynamic") if kind == "rigid" else (kind.capitalize(),)
+                for physical_kind in physical_kinds:
+                    for category in self.config[f"env{env_id}"].get(physical_kind, {}).values():
+                        for instance in category:
+                            obj = objects.get(instance["inst_name"])
+                            if obj is not None:
+                                obj.instance_config = instance
+                                obj.default_pos = instance["default_pos"]
+                                obj.default_ori = instance["default_ori"]
+                                if hasattr(obj, "scale"):
+                                    obj.scale = instance.get("scale", obj.scale)
+                                if hasattr(obj, "init_scale"):
+                                    obj.init_scale = instance.get("scale", obj.init_scale)
         self.reload_lights(env_id)
         self.reload_ground(env_id)
 
@@ -598,10 +657,26 @@ class SceneManager:
                     continue
                 self.spawn_category_objects(env_id, cat_name, objects_cfg[physics_type][cat_name], exclude_types)
 
-    def close(self):
+    def close(self, *, clear_prims=True):
         self.layout_manager.close()
         for env_id in range(self.num_envs):
-            self.clear_scene_objects(env_id)
+            if clear_prims:
+                self.clear_scene_objects(env_id)
+            else:
+                # Whole-environment teardown lets SimulationContext detach
+                # PhysX before closing USD. Deleting live prims first would
+                # invalidate native body/deformable views during cleanup.
+                for collection in (
+                    self._rigid_and_dynamic_objects[env_id],
+                    self._articulation_objects[env_id],
+                    self._garment_objects[env_id],
+                    self._geometry_objects[env_id],
+                    self._fluid_objects[env_id],
+                ):
+                    for obj in collection.values():
+                        if isinstance(obj, (GarmentObject, FluidObject)):
+                            obj.close()
+                    collection.clear()
 
             self._lights[env_id].clear()
             self._rooms[env_id] = None

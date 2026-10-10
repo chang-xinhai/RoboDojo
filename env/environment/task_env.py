@@ -52,6 +52,7 @@ class TaskEnv(BaseEnv):
             scene_config=self.scene_config,
             task_config=config.task_env,
         )
+        self.scene_manager.retained_layout_inventory = config.get("retained_layout_inventory")
         saved_layouts = config.get("saved_layouts")
         if saved_layouts is not None:
             if len(saved_layouts) != self.num_envs:
