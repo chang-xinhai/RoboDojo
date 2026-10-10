@@ -91,6 +91,13 @@ class RobotManager:
             if robot.robot_type == "arm":
                 target_joints = as_torch(key.data.default_joint_pos).clone()
                 target_vel = as_torch(key.data.default_joint_vel).clone()
+                # Restore actual joint state as well as drive targets; targets
+                # alone preserve momentum from the previous episode.
+                if hasattr(key, "write_joint_state_to_sim_index"):
+                    key.write_joint_state_to_sim_index(position=target_joints, velocity=target_vel)
+                else:
+                    key.write_joint_state_to_sim(target_joints, target_vel)
+                key.reset()
                 set_joint_target(key, target_joints)
                 set_joint_target(key, target_vel, kind="velocity")
 

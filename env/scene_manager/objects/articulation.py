@@ -13,8 +13,10 @@ from omegaconf import DictConfig
 import omni.kit.commands
 import omni.physx.scripts.utils as physx_utils
 import omni.usd
-from pxr import PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
+from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
 import torch
+
+from utils.live_geometry import get_live_world_transform
 
 
 class ArticulationObject(SingleArticulation):
@@ -93,10 +95,21 @@ class ArticulationObject(SingleArticulation):
 
     def _apply_default_velocities(self):
         """Re-apply default linear/angular velocity if configured."""
+        # Separate linear/angular setters cannot write DirectGPU state.
+        # This native six-component setter writes both through the tensor API.
+        view = self._articulation_view
+        velocity = view.get_velocities()
         if self._default_linear_velocity is not None:
-            self.set_linear_velocity(torch.tensor(self._default_linear_velocity))
+            velocity[:, :3] = view._backend_utils.convert(
+                self._default_linear_velocity, device=view._device, dtype="float32"
+            )
         if self._default_angular_velocity is not None:
-            self.set_angular_velocity(torch.tensor(self._default_angular_velocity))
+            velocity[:, 3:] = view._backend_utils.convert(
+                self._default_angular_velocity, device=view._device, dtype="float32"
+            )
+        view.set_velocities(velocity)
+        joints = self.get_joint_velocities()
+        self.set_joint_velocities(joints * 0.0)
 
     def fix_root_link(self):
         stage = get_current_stage()
@@ -362,9 +375,9 @@ class ArticulationObject(SingleArticulation):
         link_prim = self._find_link_prim_by_name(link_name)
         if link_prim is None:
             raise ValueError(f"Cannot find link '{link_name}' under articulation root {self._prim_path}")
-        world_tf = UsdGeom.Xformable(link_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        world_tf = get_live_world_transform(self, link_prim)
         pos_world = np.array(world_tf.ExtractTranslation(), dtype=np.float32)
-        quat = world_tf.ExtractRotationQuat()
+        quat = Gf.Transform(world_tf).GetRotation().GetQuat()
         quat_wxyz = np.array(
             [quat.GetReal(), quat.GetImaginary()[0], quat.GetImaginary()[1], quat.GetImaginary()[2]], dtype=np.float32
         )
@@ -390,9 +403,7 @@ class ArticulationObject(SingleArticulation):
 
         for prim in Usd.PrimRange(root_prim):
             if not (
-                prim.IsA(UsdPhysics.PrismaticJoint)
-                or prim.IsA(UsdPhysics.RevoluteJoint)
-                or prim.IsA(UsdPhysics.Joint)
+                prim.IsA(UsdPhysics.PrismaticJoint) or prim.IsA(UsdPhysics.RevoluteJoint) or prim.IsA(UsdPhysics.Joint)
             ):
                 continue
             drive_type = self._get_joint_drive_type(prim)

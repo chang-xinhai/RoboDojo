@@ -147,6 +147,8 @@ def test_scalar_pose_inputs_raise_clear_value_error(value):
 @pytest.mark.parametrize("requires_readback", [False, True])
 def test_particle_pipeline_selector_preserves_cuda_manager(requires_readback, monkeypatch):
     monkeypatch.setattr("utils.legacy_prim_adapter.install_legacy_prim_adapter", lambda: (object(), ()))
+    readback_managers = []
+    monkeypatch.setattr("utils.particle_readback_bridge.install_particle_readback_bridge", readback_managers.append)
     physics_manager = SimpleNamespace(device="cuda:0")
     settings = {}
     cls = load_class(
@@ -161,6 +163,7 @@ def test_particle_pipeline_selector_preserves_cuda_manager(requires_readback, mo
     instance._requires_particle_readback = requires_readback
     context = SimpleNamespace(physics_manager=physics_manager, set_setting=settings.__setitem__)
     instance.setup_physics(SimpleNamespace(sim=context))
+    assert readback_managers == ([physics_manager] if requires_readback else [])
     assert instance.physics_context is physics_manager
     assert instance.physics_context.device == "cuda:0"
     if requires_readback:

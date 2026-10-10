@@ -133,9 +133,11 @@ class TaskEnv(BaseEnv):
         self.robot_manager.control_robot(meta_control_list=meta_control_list)
 
     def close(self):
+        if self.sim is not None:
+            self.sim.sim.stop()
         self.tactile_manager.destroy()
         self.capture_manager.destroy()
         self.camera_manager.destroy()
         self.robot_manager.close()
-        self.scene_manager.close()
+        self.scene_manager.close(clear_prims=False)
         super().close()

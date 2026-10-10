@@ -7,11 +7,11 @@ from isaacsim.core.utils.prims import get_prim_at_path
 from isaacsim.core.utils.stage import add_reference_to_stage, get_current_stage
 import numpy as np
 from omegaconf import DictConfig
-import omni.usd
 from pxr import Gf, Usd, UsdGeom
 import torch
 
 from env.scene_manager.layout_manager import LayoutManager
+from utils.live_geometry import get_live_world_transform
 
 
 class DynamicObject(_SinglePrimWrapper):
@@ -95,13 +95,13 @@ class DynamicObject(_SinglePrimWrapper):
 
         mesh_prim = UsdGeom.Mesh.Get(self.stage, mesh_path)
         points_local = np.array(mesh_prim.GetPointsAttr().Get(), dtype=np.float32)
-        world_tf = omni.usd.get_world_transform_matrix(mesh_prim.GetPrim())
+        world_tf = get_live_world_transform(self, mesh_prim.GetPrim())
         points_world = np.array(
             [list(world_tf.Transform(Gf.Vec3d(float(p[0]), float(p[1]), float(p[2])))) for p in points_local],
             dtype=np.float32,
         )
 
-        rot_quat = world_tf.ExtractRotationQuat()
+        rot_quat = Gf.Transform(world_tf).GetRotation().GetQuat()
         pos_world = np.array(world_tf.ExtractTranslation(), dtype=np.float32)
         ori_world = np.array([rot_quat.GetReal(), *rot_quat.GetImaginary()], dtype=np.float32)
 

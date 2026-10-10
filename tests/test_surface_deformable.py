@@ -244,6 +244,7 @@ def test_cpu_physics_request_fails_instead_of_disappearing(kind):
 
 def test_cuda_dynamic_contact_topology_exists_before_sensor_initialization():
     spawned = []
+    current_stage = object()
     types = ["rigid", "dynamic", "articulation", "garment", "fluid", "geometry"]
     manager = SimpleNamespace(
         device=SimpleNamespace(type="cuda"),
@@ -255,7 +256,10 @@ def test_cuda_dynamic_contact_topology_exists_before_sensor_initialization():
         _set_env_seed=lambda _i: None,
         spawn_scene_objects=lambda **kwargs: spawned.append(kwargs),
     )
-    scene_manager_method("initialize")(manager, SimpleNamespace(scene=SimpleNamespace(env_origins=[0])))
+    scene_manager_method("initialize")(
+        manager, SimpleNamespace(sim=SimpleNamespace(stage=current_stage), scene=SimpleNamespace(env_origins=[0]))
+    )
+    assert manager.stage is current_stage
     assert set(types) - set(spawned[0]["exclude_types"]) == {"rigid", "dynamic", "articulation"}
 
 
