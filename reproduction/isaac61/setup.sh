@@ -16,7 +16,10 @@ git submodule update --init third_party/IsaacLab3 third_party/curobo XPolicyLab
 "$ROBODOJO_UV" venv --python 3.12 --allow-existing "$ROBODOJO_VENV"
 source "$ROBODOJO_ROOT/reproduction/isaac61/environment.sh"
 export UV_PROJECT_ENVIRONMENT="$ROBODOJO_VENV"
+export UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-180}"
+export UV_HTTP_RETRIES="${UV_HTTP_RETRIES:-5}"
 "$ROBODOJO_UV" sync --project reproduction/isaac61 --locked
+"$ROBODOJO_UV" pip check --python "$ROBODOJO_VENV/bin/python"
 "$ROBODOJO_UV" pip freeze --python "$ROBODOJO_VENV/bin/python" > reproduction/isaac61/requirements-resolved.txt
 "$ROBODOJO_VENV/bin/python" reproduction/isaac61/fetch_tacsl_assets.py
 bash reproduction/isaac61/run.sh smoke

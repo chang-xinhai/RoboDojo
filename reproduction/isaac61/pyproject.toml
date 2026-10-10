@@ -8,6 +8,7 @@ dependencies = [
     "torchvision>=0.26.0",
     "torchaudio>=2.11",
     "onnx>=1.18.0",
+    "onnxruntime-gpu==1.26.0",
     "prettytable>=3.3.0",
     "psutil",
     "protobuf>=4.25.8,!=5.26.0",
@@ -76,16 +77,20 @@ dependencies = [
 package = false
 index-strategy = "unsafe-best-match"
 prerelease = "allow"
+# The NVIDIA index exposes arm64 metadata for isaacsim-robot to uv's
+# universal resolver. Its x86_64 wheel requires onnxruntime-gpu instead.
+exclude-dependencies = ["onnxruntime"]
 override-dependencies = [
-    "numpy>=2",
+    "numpy==2.3.1",
     "mujoco~=3.11.0",
     "mujoco-warp~=3.11.0",
-    "newton[sim]==1.5.2",
-    "newton-usd-schemas>=0.4.1",
+    "newton[sim]==1.5.0",
+    "newton-usd-schemas==0.4.1",
     "torch==2.11.0",
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
-    "packaging>=20,<27",
+    "packaging==26.0",
+    "setuptools-scm==9.2.2",
     "warp-lang==1.16.0",
     "usd-exchange==2.3.0",
 ]
