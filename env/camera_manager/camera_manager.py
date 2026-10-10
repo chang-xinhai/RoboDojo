@@ -67,6 +67,8 @@ class CameraManager:
             List[Tuple[ndarray]]
         ] = []  # Describes noise in coordinates and orientation when a camera moves, read from config
         self.camera_poses: List[List[ndarray]] = []
+        self.structured_light_enabled = bool(camera_config.get("structured_light", {}).get("enabled", False))
+        self._structured_light_capture = None
         self._seeds_per_env: List[int] | None = None
         self.update_env_seeds(seeds_per_env)
 
@@ -113,6 +115,9 @@ class CameraManager:
                         pass
 
     def destroy(self):
+        if self._structured_light_capture is not None:
+            self._structured_light_capture.destroy()
+            self._structured_light_capture = None
         self._remove_camera_prims()
         self.cameras = []
         self.cameras_xform_path = []
@@ -123,6 +128,9 @@ class CameraManager:
 
     def _rebuild_cameras(self):
         """Recreate cameras and xforms when previous handles expired."""
+        if self._structured_light_capture is not None:
+            self._structured_light_capture.destroy()
+            self._structured_light_capture = None
         self._remove_camera_prims()
         self.cameras = []
         self.cameras_xform_path = []
@@ -169,6 +177,8 @@ class CameraManager:
             self.camera_names.append([])
             cam_id = 0
             config = deepcopy(OmegaConf.to_container(self.init_config, resolve=True))
+            config.pop("structured_light", None)
+            default_frequency = 30
             if "output_dir" in config:
                 config.pop("output_dir")
             if "disable_render_product" in config:
@@ -489,3 +499,22 @@ class CameraManager:
         T[:3, :3] = R
         T[:3, 3] = pos
         return T
+
+    def capture_multimodal(self, env_id: int = 0) -> dict:
+        """Capture RGB, ground truth depth, projected stereo IR and SL depth.
+
+        All modalities share one physics timestamp. Projector phases only
+        render; they do not advance physics. Requires the structured_light
+        camera profile and a running Isaac Sim 6.1 simulation context.
+        """
+        if not self.structured_light_enabled:
+            raise RuntimeError("Select a camera profile with structured_light.enabled=true")
+        if not 0 <= env_id < self.num_envs:
+            raise IndexError(f"env_id {env_id} exceeds num_envs {self.num_envs}")
+        if self._structured_light_capture is None:
+            from env.camera_manager.structured_light import StructuredLightCapture
+
+            self._structured_light_capture = StructuredLightCapture(
+                self, OmegaConf.to_container(self.init_config.structured_light, resolve=True)
+            )
+        return self._structured_light_capture.capture(env_id)

