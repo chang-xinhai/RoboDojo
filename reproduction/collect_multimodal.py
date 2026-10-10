@@ -1,6 +1,6 @@
 """Capture actual RoboDojo RGB/depth/stereo IR and bilateral TacSL frames.
 
-Run via reproduction/run.sh so Isaac Sim and Isaac Lab resolve before imports.
+Run via reproduction/isaac61/run.sh collect so simulator imports resolve.
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from env.camera_manager.capture.render_sync import add_zero_delay_kit_args
 add_zero_delay_kit_args(args)
 launcher = AppLauncher(args)
 app = launcher.app
+success = False
 try:
     import numpy as np
     from omegaconf import OmegaConf
@@ -112,13 +113,21 @@ try:
         reports.append(report)
         print(json.dumps(report), flush=True)
     writer.close()
-    (args.output / "validation.json").write_text(
-        json.dumps({"status": "passed", "real_runtime": True, "frames": reports}, indent=2) + "\n"
-    )
     env.close()
     if args.visualize:
         from reproduction.visualize_multimodal import visualize
 
         print(json.dumps(visualize(args.output)), flush=True)
+    (args.output / "validation.json").write_text(
+        json.dumps({"status": "passed", "real_runtime": True, "frames": reports}, indent=2) + "\n"
+    )
+    success = True
+except BaseException:
+    # SimulationApp may exit the process directly during cleanup; print the
+    # active error before close and preserve its failure status explicitly.
+    import traceback
+
+    traceback.print_exc()
+    raise
 finally:
-    app.close(wait_for_replicator=False, skip_cleanup=True)
+    app.close(exit_code=0 if success else 1, wait_for_replicator=False, skip_cleanup=True)

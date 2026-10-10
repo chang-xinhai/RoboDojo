@@ -7,4 +7,5 @@ scene:
 
 # Independent projector phases must not accumulate temporal AA history.
 render:
-  antialiasing_mode: Off
+  antialiasing_mode: "Off"
+  rendering_mode: performance
