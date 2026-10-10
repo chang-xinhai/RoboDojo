@@ -23,6 +23,12 @@ _curobo_runtime.cuda_graph_reset = True
 
 
 class CuroboPlanner:
+    """cuRobo consumes RoboDojo poses in [XYZ, WXYZ] order.
+
+    RobotManager converts Isaac Lab 3's XYZW data before passing poses here.
+    cuRobo's quaternion API retains WXYZ and must not be converted again.
+    """
+
     def __init__(
         self,
         robot_origin_pose,

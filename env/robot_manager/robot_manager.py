@@ -12,9 +12,9 @@ import transforms3d as t3d
 
 from env.environment.isaac.isaac_rl_env import IsaacRLEnv
 from env.global_configs import ENV_REGEX_NAMESPACE
-from env.planner_manager.curobo_planner import CuroboPlanner
 from env.robot_manager.control_manager import ControlManager, MetaControl
 from utils.ensure_usd_path import ensure_usd_path
+from utils.isaaclab_compat import as_torch, pose_xyzw_to_wxyz, set_joint_target, wxyz_to_xyzw
 
 
 class RobotManager:
@@ -89,16 +89,17 @@ class RobotManager:
         for idx, robot in enumerate(self.robot_list):
             key = self.robot_key[idx]
             if robot.robot_type == "arm":
-                target_joints = key.data.default_joint_pos.clone()
-                target_vel = key.data.default_joint_vel.clone()
-                key.set_joint_position_target(target_joints)
-                key.set_joint_velocity_target(target_vel)
+                target_joints = as_torch(key.data.default_joint_pos).clone()
+                target_vel = as_torch(key.data.default_joint_vel).clone()
+                set_joint_target(key, target_joints)
+                set_joint_target(key, target_vel, kind="velocity")
 
     def set_robot_init_state(self, env_idx_list=None):
         if env_idx_list is None:
             env_idx_list = range(self.num_envs)
 
-        state_dict = [{} for _ in range(len(env_idx_list))]
+        # Index by actual environment id, including non-contiguous reset subsets.
+        state_dict = {env_idx: {} for env_idx in env_idx_list}
         for idx, robot in enumerate(self.robot_list):
             if robot.robot_type == "arm":
                 joint_list = self.get_joint(robot=robot)
@@ -145,7 +146,9 @@ class RobotManager:
         key = self.robot_key[self.robot_list.index(robot)]
         entity_link = key.body_names
         env_origin_pos = deepcopy(self.scene.env_origins)
-        link_pose = key.data.body_link_pose_w.clone()
+        # Isaac Lab 3 stores [XYZ, XYZW]; every public RoboDojo pose remains
+        # [XYZ, WXYZ] for transforms3d, cuRobo and policy observations.
+        link_pose = pose_xyzw_to_wxyz(key.data.body_link_pose_w)
 
         if link_name not in entity_link:
             raise ValueError(f"Link name {link_name} not found in robot {robot.robot_name}")
@@ -155,7 +158,7 @@ class RobotManager:
             if env_idx in env_idx_list:
                 pose = deepcopy(link_pose[env_idx][link_idx])
                 if not is_relative:
-                    results[env_idx] = np.array(pose.cpu())
+                    results[env_idx] = pose.detach().cpu().numpy().copy()
                 else:
                     origin_pos = env_origin_pos[env_idx]
                     # pose: [x, y, z, qw, qx, qy, qz] in world frame
@@ -163,7 +166,7 @@ class RobotManager:
                     # relative position = world_pos - origin_pos (origin has translation only)
                     rel_pose = pose.clone()
                     rel_pose[:3] = rel_pose[:3] - origin_pos
-                    results[env_idx] = np.array(rel_pose.cpu())
+                    results[env_idx] = rel_pose.detach().cpu().numpy().copy()
 
             else:
                 results[env_idx] = None
@@ -176,11 +179,11 @@ class RobotManager:
         results = {}
         key = self.robot_key[self.robot_list.index(robot)]
         arm_indices = robot.arm_joint_indices
-        joint_state = key.data.joint_pos.clone()
+        joint_state = as_torch(key.data.joint_pos)
         for env_idx in range(self.num_envs):
             if env_idx in env_idx_list:
                 joints = deepcopy(joint_state[env_idx][arm_indices])
-                results[env_idx] = np.array(joints.cpu())
+                results[env_idx] = joints.detach().cpu().numpy().copy()
             else:
                 results[env_idx] = None
         return results
@@ -192,11 +195,11 @@ class RobotManager:
         results = {}
         key = self.robot_key[self.robot_list.index(robot)]
         gripper_indices = robot.gripper_joint_indices
-        joint_state = key.data.joint_pos.clone()
+        joint_state = as_torch(key.data.joint_pos)
         for env_idx in range(self.num_envs):
             if env_idx in env_idx_list:
                 joints = deepcopy(joint_state[env_idx][gripper_indices])
-                results[env_idx] = np.array(joints.cpu())
+                results[env_idx] = joints.detach().cpu().numpy().copy()
             else:
                 results[env_idx] = None
         return results
@@ -365,6 +368,8 @@ class RobotManager:
             if isinstance(meta_control_list[env_idx], MetaControl):
                 plan_num += 1
                 plan_lst.append(env_idx)
+        if plan_num == 0:
+            return
         for robot in self.robot_list:
             if robot.robot_type == "arm":
                 action_dim = len(robot.arm_joint_indices)
@@ -396,9 +401,10 @@ class RobotManager:
                     )
 
                 env_ids = torch.tensor(plan_lst, dtype=torch.int32, device=arm_velocity.device)
-                arm.set_joint_position_target(arm_position, joint_ids=robot.arm_joint_indices, env_ids=env_ids)  # arm
-                arm.set_joint_velocity_target(arm_velocity, joint_ids=robot.arm_joint_indices, env_ids=env_ids)  # arm
-                arm.set_joint_position_target(
+                set_joint_target(arm, arm_position, joint_ids=robot.arm_joint_indices, env_ids=env_ids)
+                set_joint_target(arm, arm_velocity, kind="velocity", joint_ids=robot.arm_joint_indices, env_ids=env_ids)
+                set_joint_target(
+                    arm,
                     gripper_position,
                     joint_ids=robot.gripper_joint_indices,
                     env_ids=env_ids,
@@ -499,11 +505,15 @@ class RobotManager:
                 self.robot_key.append(self.scene[f"robot{idx}"])
                 idx += 1
         for idx, robot in enumerate(self.robot_list):
-            robot.gripper_joint_indices, gripper_names = self.robot_key[idx].find_joints(robot.gripper_joints_name)
+            robot.gripper_joint_indices, gripper_names = self.robot_key[idx].find_joints(
+                robot.gripper_joints_name, preserve_order=True
+            )
             robot.gripper_joints_name = gripper_names
 
             if robot.robot_type == "arm":
-                robot.arm_joint_indices, arm_names = self.robot_key[idx].find_joints(robot.arm_joints_name)
+                robot.arm_joint_indices, arm_names = self.robot_key[idx].find_joints(
+                    robot.arm_joints_name, preserve_order=True
+                )
                 robot.arm_joints_name = arm_names
                 robot.action_dim = len(robot.arm_joint_indices)
 
@@ -530,14 +540,18 @@ class RobotManager:
             env_spacing=env_spacing,
             replicate_physics=replicate_physics,
         )
+        scene_idx = 0
         for idx, robot in enumerate(self.robot_list):
             if self.use_scene_cfg[idx]:
-                setattr(scene_cfg, f"robot{idx}", robot.SceneCfg)
+                setattr(scene_cfg, f"robot{scene_idx}", robot.SceneCfg)
+                scene_idx += 1
         ensure_usd_path(scene_cfg)
         return scene_cfg
 
     def _setup_planner(self, robot):
         if robot.robot_type == "arm":
+            from env.planner_manager.curobo_planner import CuroboPlanner
+
             root_pose = deepcopy(robot.entity_origin_pose)
             self.planner[robot.robot_name] = CuroboPlanner(
                 robot_origin_pose=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
@@ -624,7 +638,7 @@ class RobotManager:
             prim_path=f"{ENV_REGEX_NAMESPACE}/robot{idx}",
             init_state=ArticulationCfg.InitialStateCfg(
                 pos=base_pose[:3],
-                rot=base_pose[-4:],
+                rot=tuple(wxyz_to_xyzw(base_pose[-4:])),
                 joint_pos=scene_cfg.init_state.joint_pos,
             ),
         )

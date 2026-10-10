@@ -5,6 +5,7 @@ from env.environment.base_env import BaseEnv
 from env.robot_manager.control_manager import ControlSeq
 from env.robot_manager.robot_manager import RobotManager
 from env.scene_manager.scene_manager import SceneManager
+from env.tactile_manager import TactileManager
 
 
 class TaskEnv(BaseEnv):
@@ -41,6 +42,12 @@ class TaskEnv(BaseEnv):
             scene_config=self.scene_config,
             task_config=config.task_env,
         )
+        self.tactile_manager = TactileManager(
+            self.num_envs,
+            config=config.get("tactile", {}),
+            robot_manager=self.robot_manager,
+            device=self.device,
+        )
 
         self.robot_manager._load_camera_cfg(config.camera)
         self.capture_config = config.camera
@@ -66,10 +73,25 @@ class TaskEnv(BaseEnv):
 
     def _post_setup_scene(self, sim):
         self.scene_manager.initialize(sim)
+        # TacSL mounts and SDF schemas must exist before Isaac Lab activates
+        # the PhysX articulation and contact views during its first reset.
+        self.tactile_manager.initialize(sim, self.scene_manager)
         super()._post_setup_scene(sim)
         self.camera_manager.initialize(sim)
         self.capture_manager.initialize(sim)
         self.camera_manager.post_init()
+        # These legacy Replicator cameras are owned outside InteractiveScene,
+        # so publish their rendering requirement to Isaac Lab explicitly.
+        sim.sim.set_setting("/isaaclab/render/rtx_sensors", True)
+        from isaaclab_physx.renderers.isaac_rtx_renderer_utils import ensure_isaac_rtx_render_update
+
+        # With --viz none, SimulationContext.render() has no Kit visualizer to
+        # pump app.update(). Use the backend's deduplicated camera pump: it
+        # synchronizes Fabric and pauses physics while producing the image.
+        sim.sim.add_render_callback(
+            "robodojo_legacy_camera_capture",
+            lambda _: ensure_isaac_rtx_render_update(force=True),
+        )
 
     def update_seed(self, seed: Any | None = None):
         super().update_seed(seed)
@@ -84,15 +106,18 @@ class TaskEnv(BaseEnv):
         super().reset(seed=seed, options=options)
         self.scene_manager.reload_scene()
         self.robot_manager.reset()
+        self.tactile_manager.reset()
         for _ in range(300):
             self.sim_step(render=False)
         self.camera_manager.reset()
         self.capture_manager.reset()
+        self.tactile_manager.calibrate()
 
     def step(self, meta_control_list: List[ControlSeq]):
         self.robot_manager.control_robot(meta_control_list=meta_control_list)
 
     def close(self):
+        self.tactile_manager.destroy()
         self.capture_manager.destroy()
         self.camera_manager.destroy()
         self.robot_manager.close()

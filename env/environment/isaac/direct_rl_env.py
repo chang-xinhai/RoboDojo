@@ -3,7 +3,9 @@ from isaaclab.envs.direct_rl_env import DirectRLEnv
 
 class CustomDirectRLEnv(DirectRLEnv):
     def sim_step(self, render: bool = True):
-        is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
+        # Cameras are owned by RoboDojo, so the app must pump even though
+        # they are not registered as Isaac Lab Camera assets.
+        is_rendering = self.sim.is_rendering or bool(self.sim.get_setting("/isaaclab/render/rtx_sensors"))
 
         for _ in range(self.cfg.decimation):
             self._sim_step_counter += 1

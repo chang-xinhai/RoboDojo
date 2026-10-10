@@ -4,12 +4,11 @@ from typing import Any
 import gymnasium as gym
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab_tasks.utils import parse_env_cfg  # this need dynamic import
 from isaacsim.core.utils.stage import get_current_stage
 from omegaconf import DictConfig, OmegaConf
 from omni.physx import acquire_physx_interface
 
-from env.environment.isaac.isaac_rl_env import IsaacRLEnv
+from env.environment.isaac.isaac_rl_env import IsaacRLEnv, IsaacRLEnvCfg
 from env.seeding import seed_everywhere
 
 DEFAULT_SIM_DEVICE = "cpu"
@@ -78,16 +77,29 @@ def _apply_physx_settings(physx_cfg, config):
         setattr(physx_cfg, key, value)
 
 
-def _apply_render_settings(render_cfg, render_config, frequency_settings):
+def _apply_render_settings(render_config, frequency_settings):
+    from isaaclab_physx.renderers.isaac_rtx_renderer_cfg import IsaacRtxRendererGlobalSettingsCfg
+    from isaaclab_physx.renderers.isaac_rtx_renderer_utils import apply_isaac_rtx_global_settings
+
+    render_cfg = IsaacRtxRendererGlobalSettingsCfg()
     for key in _RENDER_KEYS:
-        setattr(render_cfg, key, render_config[key])
+        if key != "rendering_mode":
+            setattr(render_cfg, key, render_config[key])
 
     carb_settings = render_config.get("carb_settings") or {}
     if isinstance(carb_settings, DictConfig):
         carb_settings = OmegaConf.to_container(carb_settings, resolve=True)
     carb_settings = dict(carb_settings)
     carb_settings.update(frequency_settings)
+    rendering_mode = render_config.get("rendering_mode", "quality")
+    modes = {"quality": "RealTimePathTracing", "balanced": "RealTimePathTracing", "performance": "RaytracedLighting"}
+    if rendering_mode not in modes:
+        raise ValueError(f"Unsupported render.rendering_mode: {rendering_mode!r}")
+    carb_settings.setdefault("/rtx/rendermode", modes[rendering_mode])
     render_cfg.carb_settings = carb_settings
+    # SimulationCfg.render moved into renderer backends in Isaac Lab 3. Our
+    # legacy Replicator capture still needs these process-global RTX settings.
+    apply_isaac_rtx_global_settings(render_cfg)
 
 
 class BaseEnv(gym.Env):
@@ -118,7 +130,9 @@ class BaseEnv(gym.Env):
         Args:
             config (DictConfig): The configuration for the environment. This comes from hydra yaml.
         """
-        self.sim_cfg: DirectRLEnvCfg = parse_env_cfg("IsaacRLEnv-V0", device=self.device, use_fabric=self.use_fabric)
+        self.sim_cfg: DirectRLEnvCfg = IsaacRLEnvCfg()
+        self.sim_cfg.sim.device = self.device
+        self.sim_cfg.sim.use_fabric = self.use_fabric
 
         self.sim_cfg.decimation = config.decimation
         self.sim_cfg.sim.dt = config.get("dt", 1 / 60)
@@ -141,13 +155,13 @@ class BaseEnv(gym.Env):
             self.sim: IsaacRLEnv = gym.make(
                 "IsaacRLEnv-V0",
                 cfg=self.sim_cfg,
-                render_mode="rgb_array",
+                render_mode=None,
                 func={
                     "_setup_scene": self._setup_scene,
                     "_reset_idx": self._reset_idx,
                     "_post_setup_scene": self._post_setup_scene,
                 },
-            )
+            ).unwrapped
         except Exception:
             traceback.print_exc()
             raise
@@ -178,8 +192,8 @@ class BaseEnv(gym.Env):
             self.config.get("frequency_settings"),
         )
 
-        _apply_render_settings(self.sim_cfg.sim.render, render_config, frequency_settings)
-        _apply_physx_settings(self.sim_cfg.sim.physx, physx_config)
+        _apply_render_settings(render_config, frequency_settings)
+        _apply_physx_settings(self.sim_cfg.sim.physics, physx_config)
 
     def sim_step(self, render: bool = True):
         """
@@ -194,10 +208,9 @@ class BaseEnv(gym.Env):
         """
         # enable cpu garment and deformable
         self.physics_interface = acquire_physx_interface()
-        self.physics_interface.overwrite_gpu_setting(1)
-
-        # expose physics context
-        self.physics_context = sim.sim.get_physics_context()
+        # Preserve the configured backend/device. Forcing the GPU setting here
+        # made the CPU garment path inconsistent with the simulation config.
+        self.physics_context = sim.sim.physics_manager
 
     def close(self):
         try:

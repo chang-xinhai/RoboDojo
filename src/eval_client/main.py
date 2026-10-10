@@ -7,6 +7,8 @@ import sys
 
 from isaaclab.app import AppLauncher
 
+from utils.isaaclab_compat import add_app_launcher_args
+
 MAX_INPROC_RESTARTS = 3
 
 parser = argparse.ArgumentParser()
@@ -60,8 +62,11 @@ parser.add_argument(
 
 parser.add_argument("--seed", type=int, required=True, help="policy seed for eval")
 
-AppLauncher.add_app_launcher_args(parser)
+add_app_launcher_args(parser, AppLauncher)
 args_cli = parser.parse_args()
+args_cli.enable_cameras = True
+if not getattr(args_cli, "device_explicit", False):
+    args_cli.device = f"cuda:{args_cli.device_id}"
 
 # Safe to import before AppLauncher: env is a namespace package (no __init__)
 # and GLOBAL_CONFIGS only imports os, so this pulls in no app-dependent code.
@@ -306,14 +311,12 @@ def main():
             "task_env": load_yaml(task_registry.task_config_path(os.path.join(BENCHMARK_PATH, "config"), task_name)),
             "eval_cfg": eval_cfg,
             "deploy_cfg": deploy_cfg,
+            "tactile": eval_cfg.get("tactile", {}),
         }
     )
     capped_num_envs = resolve_random_task_num_envs(task_name, num_envs, env_cfg.sim)
     if capped_num_envs != num_envs:
-        print(
-            f"[main] Random task {task_name}: num_envs capped "
-            f"{num_envs} -> {capped_num_envs} "
-        )
+        print(f"[main] Random task {task_name}: num_envs capped {num_envs} -> {capped_num_envs} ")
     num_envs = capped_num_envs
     if not eval_batch and num_envs != 1:
         print(
