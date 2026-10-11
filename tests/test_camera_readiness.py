@@ -122,6 +122,59 @@ class CameraReadinessTests(unittest.TestCase):
                 readiness.wait_for_camera_data(env, self.payload, physics_state=lambda: 100, max_passes=3)
         self.assertEqual(len(rendered), 3)
 
+    def test_native_completed_deliveries_work_with_frozen_reference_time(self):
+        completed = [0, 0]
+
+        def render():
+            completed[0] += 1
+            completed[1] += 1
+
+        with patch.object(readiness, "zero_delay_active", return_value=True):
+            data, passes = readiness.wait_for_camera_data(
+                SimpleNamespace(render=render),
+                self.payload,
+                physics_state=lambda: 100,
+                delivery_clock=lambda: tuple(completed),
+                min_passes=4,
+                max_passes=8,
+            )
+        self.assertEqual(passes, 4)
+        self.assertEqual(readiness.pending_camera_payloads(data), [])
+
+    def test_viewport_or_fast_camera_cannot_fence_a_stalled_stereo_eye(self):
+        completed = [0, 0]
+
+        def render():
+            completed[0] += 1
+
+        with patch.object(readiness, "zero_delay_active", return_value=True):
+            with self.assertRaisesRegex(readiness.CameraFrameNotReady, "0/1 fresh frames"):
+                readiness.wait_for_camera_data(
+                    SimpleNamespace(render=render),
+                    self.payload,
+                    physics_state=lambda: 100,
+                    delivery_clock=lambda: tuple(completed),
+                    max_passes=3,
+                )
+
+    def test_native_sample_fence_waits_for_delayed_actual_completion(self):
+        updates = [0]
+        completed = [0]
+
+        def render():
+            updates[0] += 1
+            if updates[0] % 2 == 0:
+                completed[0] += 1
+
+        with patch.object(readiness, "zero_delay_active", return_value=True):
+            passes = readiness.wait_for_latest_cameras(
+                SimpleNamespace(render=render),
+                delivery_clock=lambda: tuple(completed),
+                min_passes=3,
+                max_passes=6,
+            )
+        self.assertEqual(passes, 6)
+
 
 if __name__ == "__main__":
     unittest.main()

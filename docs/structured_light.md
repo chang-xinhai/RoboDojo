@@ -25,8 +25,9 @@ texture, an octahedral direction-to-pattern UV EXR lookup, `ShapingAPI`,
 [Isaac Sim 6.1 structured-light documentation](https://docs.isaacsim.omniverse.nvidia.com/6.1.0/sensors/isaacsim_sensors_camera_structured_light.html).
 Dedicated left/right cameras capture linear HDR images with each projector
 off and on. Ambient subtraction isolates the spatially projected light,
-including geometry, occlusion, and surface response. A shared fixed sensor gain
-preserves stereo photometric consistency. The default projection coverage
+including geometry, occlusion, and surface response. Each eye's own passive
+exposure is combined with this response using the declared electron/ADC model,
+shot/read noise and one bounded shared pair gain. The default projection coverage
 (112 by 80 degrees) follows DepthUMI's Gemini335 proxy LUT implementation.
 Generated assets are cached in ignored `.cache/isaac61/structured_light/assets`.
 
@@ -35,8 +36,12 @@ The saved provenance explicitly identifies IR as an active projector radiance
 proxy. The rig is a configurable virtual sensor and has no factory calibration
 claim. It does not substitute a grayscale RGB image for either stereo view.
 The dot layout and radiance scale should be validated for each task scene.
-Use `render.antialiasing_mode: Off` in the multimodal environment profile:
-temporal AA and DLSS blend the projector phases and suppress the dot pattern.
+The environment leaves AA off between acquisitions. Capture scopes RGB DLAA
+and IR FXAA separately, restoring prior global AA, denoiser and exposure in
+`finally`. RGB and IR each average eight actual render deliveries at one frozen
+pose; the two projector phases settle independently with the IR denoiser off.
+This avoids temporal blending of ambient and projected patterns. No spatial
+image filter or ground-truth depth filling is applied.
 Isaac Lab's headless depth-only renderer sets the global
 `/rtx/sdg/force/disableColorRender` flag. TacSL depth cameras trigger this
 optimization even when RGB/HDR products also exist. The shared capture entry
@@ -104,6 +109,49 @@ phase-specific host acquisition timestamps are retained as provenance.
 The function checks that simulation time did not advance and switches every
 projector off in `finally`, including renderer failures. Launch with the existing
 `add_zero_delay_kit_args` helper so each phase waits for its current render.
+
+Each native camera product has its own Hydra drawable-change completion fence.
+Capture waits for every requested product to complete, including both stereo
+eyes, with zero-delay Kit settings fencing annotator dispatch. The scene's SDG
+reference time can stay constant while new render samples arrive at one frozen
+pose; it is not used as the sample counter for these products.
+
+The current multimodal profile follows a persisted DepthUMI full-modal recording
+configuration from 2026-08-03: ISO 400, 20 ms, f/10, responsivity 1.10267, RGB
+DLAA, IR FXAA, eight render samples, head projector 3500 and wrist projectors
+600. It vendors the original 848x480 Gemini335L PNG with SHA-256
+`29e00bb08305fd575486e9726fd3d733141d0a00bca4e0a7d5754224f49dc2fc`,
+using a 2048-square direction LUT. This adjacent recording's persisted metadata
+is evidence for the recipe; the user's matching August 2 video lacks its original
+effective-renderer configuration snapshot, so its exact exposure is not claimed.
+The reference video's smooth depth column is renderer GT, not stereo depth.
+
+On exact Isaac Sim 6.1, the 640x480 profile passes both a one-meter front-facing
+plane and a true 30-degree tilted target. The tilted target's head/left/right
+median relative stereo errors are 0.9504%, 0.7915%, and 1.2185%; center errors
+are 0.668, 0.963, and 1.629 cm. Valid stereo coverage is 79.54%, 61.98%, and
+66.83%, with invalid pixels retained as NaN. GT agrees with the analytic plane
+within 1e-7 m median. Reports preserve actual live phase settings and raw
+projector-only radiance in `quality-iteration/sl-reference-{plane-v3,tilted-v1}/`.
+
+The complete three-frame StackBowls recording with these settings passed exact
+6.1 acquisition and lossless HDF5 validation. Its PNG/video/HTML preview reads
+`quality-iteration/native-three-v1/episode.hdf5` directly. A separate controlled
+probe holds physics frame 353 fixed and repeats each mode three times, changing
+only RGB AA off with one actual render sample versus DLAA with eight samples.
+Mean absolute temporal RGB differences fall from 38.160 to 2.146 DN for head,
+41.238 to 1.527 for left wrist and 38.647 to 1.487 for right wrist, reductions
+of 94.38%, 96.30% and 96.15%. Exposure, scene geometry and projector settings
+remain fixed. These are temporal-noise results, not spectral sensor accuracy
+or a claim that missing stereo depth has been reconstructed. Raw samples,
+actual phase settings, metrics and an unchanged-RGB comparison gallery are in
+`quality-iteration/frozen-rgb-v2/`.
+
+```sh
+bash reproduction/isaac61/run.sh python scripts/check_structured_light_live.py \
+  --sensor-profile env_cfg/camera/camera_config_multimodal.yml --resolution 640 480 \
+  --plane-tilt-deg 30 --output reproduction/isaac61/outputs/quality-iteration/sl-reference-tilted
+```
 
 CPU contracts are checked with:
 

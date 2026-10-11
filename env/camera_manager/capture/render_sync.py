@@ -17,12 +17,13 @@ buffer depends on Kit's update order:
 This project launches with ``isaaclab.python.kit``, which lacks those settings,
 so the entrypoints append them through :func:`add_zero_delay_kit_args`.
 
-:func:`wait_for_latest_cameras` renders until the SDG ``PostProcessDispatcher``
-has delivered the required number of new frames. It counts deliveries by
-watching the dispatcher's reference time change, which is the same clock
-``rep.orchestrator.step(wait_for_render=True)`` polls; it is *not* comparable
-with PhysX ``current_time``, so no absolute comparison is made. ``env.render()``
-does not advance physics.
+:func:`wait_for_latest_cameras` uses the provided native render-product
+completion clock when available. Structured-light capture subscribes to each
+product's Hydra drawable-change event: scene reference time can stay constant
+while independent samples of a frozen pose arrive. The legacy fallback watches
+SDG reference time, the clock polled by Replicator's orchestrator. Neither
+completion clock is compared with the PhysX timestamp. ``env.render()`` does
+not advance physics.
 """
 
 from __future__ import annotations
@@ -44,6 +45,45 @@ _reported_active = False
 
 class CameraFrameNotReady(RuntimeError):
     """A render product has not delivered its requested image buffer yet."""
+
+
+class RenderProductDeliveryFence:
+    """Count actual native Hydra completions for each requested render product.
+
+    SDG reference time describes scene time and can stay constant across
+    independent samples of a frozen pose. Drawable-change events identify
+    real render completion even when that clock is intentionally frozen.
+    Zero-delay Kit settings fence downstream annotator dispatch before reads.
+    """
+
+    def __init__(self, sensors):
+        import carb.eventdispatcher
+        import omni.hydratexture
+
+        self.counts = [0] * len(sensors)
+        self.subscriptions = []
+        self.paths = []
+        for index, sensor in enumerate(sensors):
+            texture = sensor._hydra_texture.hydra_texture
+            self.paths.append(str(sensor._hydra_texture.path))
+
+            def on_event(event, camera_index=index):
+                del event
+                self.counts[camera_index] += 1
+
+            subscription = carb.eventdispatcher.get_eventdispatcher().observe_event(
+                observer_name=f"RoboDojoRenderFence:{id(self)}:{index}",
+                event_name=omni.hydratexture.GLOBAL_EVENT_DRAWABLE_CHANGED,
+                filter=texture.get_event_key(),
+                on_event=on_event,
+            )
+            self.subscriptions.append(subscription)
+
+    def snapshot(self):
+        return tuple(self.counts)
+
+    def close(self):
+        self.subscriptions.clear()
 
 
 def ensure_camera_color_render_enabled(settings=None):
@@ -89,7 +129,7 @@ def pending_camera_payloads(data):
     return pending
 
 
-def wait_for_camera_data(env, read_data, *, physics_state, min_passes=1, max_passes=32):
+def wait_for_camera_data(env, read_data, *, physics_state, min_passes=1, max_passes=32, delivery_clock=None):
     """Bounded render-only wait for actual requested image buffers at one physics state.
 
     A dispatcher delivery alone does not mean a newly created render product
@@ -98,7 +138,7 @@ def wait_for_camera_data(env, read_data, *, physics_state, min_passes=1, max_pas
     """
     before = physics_state()
     ensure_camera_color_render_enabled()
-    passes = wait_for_latest_cameras(env, min_passes=min_passes, max_passes=max_passes)
+    passes = wait_for_latest_cameras(env, min_passes=min_passes, max_passes=max_passes, delivery_clock=delivery_clock)
     pending = []
     while True:
         if physics_state() != before:
@@ -201,6 +241,7 @@ def wait_for_latest_cameras(
     capture_manager=None,
     min_passes: int = 1,
     max_passes: int = 16,
+    delivery_clock=None,
 ) -> int:
     """Render until the dispatcher has delivered ``min_passes`` new frames.
 
@@ -217,14 +258,21 @@ def wait_for_latest_cameras(
         _report_active()
     max_passes = max(required, int(max_passes))
 
-    last_stamp = dispatcher_time()
+    last_stamp = dispatcher_time() if delivery_clock is None else delivery_clock()
+    initial_stamp = last_stamp
     delivered = 0
     passes = 0
     while passes < max_passes:
         env.render()
         passes += 1
-        stamp = dispatcher_time()
-        if stamp is None or last_stamp is None:
+        stamp = dispatcher_time() if delivery_clock is None else delivery_clock()
+        if delivery_clock is not None:
+            # Every requested render product must have actually completed.
+            # A busy viewport or one fast camera cannot satisfy another eye.
+            if not stamp or len(stamp) != len(initial_stamp):
+                raise CameraFrameNotReady("Native render delivery clock has no stable camera set")
+            delivered = min(current - initial for current, initial in zip(stamp, initial_stamp, strict=True))
+        elif stamp is None or last_stamp is None:
             # No dispatcher clock to watch: fall back to counting renders.
             delivered = passes
         elif stamp != last_stamp:

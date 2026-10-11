@@ -4,11 +4,51 @@ structured_light:
   enabled: true
   baseline_m: 0.05
   pattern_seed: 7
+  # Exact supplied pattern used by the read-only DepthUMI reference workflow.
+  pattern_path: env_cfg/camera/pattern/gemini335L.png
+  pattern_sha256: 29e00bb08305fd575486e9726fd3d733141d0a00bca4e0a7d5754224f49dc2fc
+  direction_lut_resolution: 2048
+  sensor_seed: 42
   projector_intensity: 1500.0
+  # DepthUMI's persisted 2026-08-03 StackBowls full-modal sensor profile.
+  # Keep station strengths explicit; the supplied video is from an earlier run.
+  projector_intensity_by_station:
+    head: 3500.0
+    left_wrist: 600.0
+    right_wrist: 600.0
   saturation_radiance: 5500.0
   settle_render_passes: 5
   max_render_passes: 32
   max_disparity: 128
+  rendering:
+    # Native-resolution DLAA for projector-off RGB, spatial FXAA for IR.
+    # Settings are scoped and restored after every frozen capture phase.
+    rgb_antialiasing_op: 4
+    ir_antialiasing_op: 2
+    rgb_settle_renders: 4
+    ir_settle_renders: 2
+    rgb_samples_per_pass: 8
+    ir_samples_per_pass: 8
+    auto_exposure_enabled: false
+    exposure:
+      filmIso: 400.0
+      exposureTime: 0.02
+      fNumber: 10.0
+      responsivity: 1.10267
+  ir_sensor_model:
+    saturation_radiance: 5500.0
+    full_well_electrons: 12000.0
+    adc_bits: 10
+    ambient_scale: 0.85
+    shot_noise_scale: 0.15
+    read_noise_electrons: 3.0
+    auto_exposure:
+      enabled: true
+      stereo_pair_shared: true
+      measurement_percentile: 95.0
+      target_dn: 180.0
+      minimum_gain: 1.0
+      maximum_gain: 1.25
 annotator:
   common:
     enabled: true

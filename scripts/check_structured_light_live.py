@@ -48,6 +48,9 @@ def main():
     parser.add_argument("--distance", type=float, default=1.0)
     parser.add_argument("--roll-deg", type=float, default=0.0)
     parser.add_argument("--plane-tilt-deg", type=float, default=0.0)
+    parser.add_argument("--sensor-profile", type=Path, help="Camera YAML whose structured_light block is validated")
+    parser.add_argument("--resolution", type=int, nargs=2, default=[320, 240], metavar=("WIDTH", "HEIGHT"))
+    parser.add_argument("--debug-render-fence", action="store_true", help="Save native render delivery diagnostics")
     args = parser.parse_args()
     if not -45 < args.plane_tilt_deg < 45:
         parser.error("--plane-tilt-deg must be between -45 and 45 degrees")
@@ -115,7 +118,7 @@ def main():
         cameras = []
         names = ["cam_head", "cam_left_wrist", "cam_right_wrist"]
         for name, x in zip(names, (0.0, -0.2, 0.2)):
-            camera = Camera(f"/World/{name}", resolution=(320, 240))
+            camera = Camera(f"/World/{name}", resolution=tuple(args.resolution))
             half_angle = np.deg2rad(args.roll_deg) / 2
             camera.set_local_pose(
                 np.array([x, 0, args.distance]),
@@ -157,6 +160,10 @@ def main():
             max_disparity=64,
             asset_cache=str(args.output / "assets"),
         )
+        if args.sensor_profile:
+            import yaml
+
+            config.update(yaml.safe_load(args.sensor_profile.read_text())["structured_light"])
         capture = StructuredLightCapture(manager, config)
         sim.initialize_physics()
         sim.play()
@@ -164,10 +171,48 @@ def main():
         # Initial graph/material/shader compilation needs more than a phase fence.
         for _ in range(30):
             sim.render()
+        if args.debug_render_fence:
+            import carb.settings
+            import omni.graph.core as og
+
+            from env.camera_manager.capture.render_sync import dispatcher_time
+
+            diagnostic = []
+            for phase in ("baseline", "rgb", "ir", "restored"):
+                from contextlib import nullcontext
+
+                with capture._phase_scope(phase) if phase in {"rgb", "ir"} else nullcontext():
+                    for render_id in range(8):
+                        sim.render()
+                        node = og.get_node_by_path("/Render/PostProcess/SDGPipeline/PostProcessDispatcher")
+                        record = {
+                            "phase": phase,
+                            "render_id": render_id,
+                            "dispatcher_time": dispatcher_time(),
+                            "physics_time": sim.current_time,
+                            "app_update_number": app._app.get_update_number(),
+                            "settings": {
+                                key: carb.settings.get_settings().get(key)
+                                for key in (
+                                    "/rtx/post/aa/op",
+                                    "/rtx-defaults/post/aa/op",
+                                    "/rtx-transient/post/aa/limitedOps",
+                                    "/rtx/rendermode",
+                                    "/rtx/sdg/force/disableColorRender",
+                                )
+                            },
+                            "dispatcher_products": list(node.get_attribute("outputs:renderProductPaths").get()),
+                        }
+                        for name, rig in capture.rigs[0].items():
+                            image = capture._array(rig["rgb"].get_data("rgb"), rig["shape"], 3)
+                            record[name] = {"sum": int(image.sum()), "std": float(image.std())}
+                        diagnostic.append(record)
+                        print("NATIVE_FENCE_DIAGNOSTIC " + json.dumps(record), flush=True)
+            (args.output / "render-fence.json").write_text(json.dumps(diagnostic, indent=2))
         frames = capture.capture()
         report = dict(
             isaacsim_version=importlib.metadata.version("isaacsim"),
-            antialiasing="Off",
+            antialiasing=config.get("rendering", {"rgb_antialiasing_op": 0, "ir_antialiasing_op": 0}),
             config=config,
             sensors={},
             physics_timestamp_ns=round(sim.current_time * 1e9),
@@ -181,12 +226,13 @@ def main():
                 minimum_depth_spatial_range_m=0.02,
             ),
         )
-        montage = Image.new("RGB", (320 * 4, 240 * 3 + 24))
+        width, height = args.resolution
+        montage = Image.new("RGB", (width * 4, height * 3 + 24))
         draw = ImageDraw.Draw(montage)
         for col, title in enumerate(
-            ("RGB projector off", "IR left active radiance", "IR right active radiance", "SL depth green = 1 meter")
+            ("RGB projector off", "IR left sensor response", "IR right sensor response", "SL depth green = 1 meter")
         ):
-            draw.text((320 * col + 8, 6), title, fill="white")
+            draw.text((width * col + 8, 6), title, fill="white")
         failed = []
         for row, (name, frame) in enumerate(frames.items()):
             depth = frame["depth_sl"]
@@ -237,6 +283,7 @@ def main():
                 depth_gt_median_m=float(np.nanmedian(frame["depth_gt"])),
                 timestamp_ns=frame["timestamp_ns"],
                 calibration=frame["calibration"],
+                provenance=frame["provenance"],
                 reference_center_depth_m=center_reference,
                 stereo_center_depth_m=center_depth,
                 stereo_plane_median_abs_error_m=reference_error,
@@ -271,12 +318,12 @@ def main():
             depth_color[..., 1] = np.where(finite, np.clip(1 - np.abs(depth - 1), 0, 1) * 255, 0).astype(np.uint8)
             for col, pixels in enumerate((frame["rgb"], frame["ir_left"], frame["ir_right"], depth_color)):
                 image = Image.fromarray(pixels).convert("RGB")
-                montage.paste(image, (320 * col, 240 * row + 24))
-            draw.rectangle((0, 240 * row + 24, 145, 240 * row + 44), fill="black")
-            draw.text((8, 240 * row + 28), name, fill="white")
+                montage.paste(image, (width * col, height * row + 24))
+            draw.rectangle((0, height * row + 24, 145, height * row + 44), fill="black")
+            draw.text((8, height * row + 28), name, fill="white")
             np.savez_compressed(
                 args.output / f"{name}.npz",
-                **{k: frame[k] for k in ("rgb", "ir_left", "ir_right", "depth_sl", "depth_gt")},
+                **{k: value for k, value in frame.items() if hasattr(value, "shape")},
             )
         montage.save(args.output / "structured_light.png")
         report["passed"] = not failed

@@ -5,7 +5,8 @@ scene:
   num_envs: 10
   env_spacing: 7
 
-# Independent projector phases must not accumulate temporal AA history.
+# Base renderer state between captures. Sensor capture scopes native RGB DLAA
+# and IR FXAA separately, settles each phase, then restores this caller state.
 render:
   antialiasing_mode: "Off"
   rendering_mode: performance
