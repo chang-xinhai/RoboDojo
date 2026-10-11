@@ -157,12 +157,52 @@ def validate_multimodal(observation, *, tactile_component=False):
                 or tactile_depth.dtype != np.float32
             ):
                 raise ValueError(f"{side}.{finger}: TacSL depth must match image dimensions in float32 metres")
-            if not np.all(np.isfinite(tactile_depth)) or np.any(tactile_depth < 0) or not np.any(tactile_depth > 0):
+            conditioned = data.get("provenance", {}).get("contact_conditioned_observations") is True
+            if (
+                not np.all(np.isfinite(tactile_depth))
+                or np.any(tactile_depth < 0)
+                or (not conditioned and not np.any(tactile_depth > 0))
+            ):
                 raise ValueError(f"{side}.{finger}: invalid TacSL optical depth")
             if "optical_depth_delta" in data:
                 delta = np.asarray(data["optical_depth_delta"])
                 if delta.shape != tactile_depth.shape or delta.dtype != np.float32 or not np.all(np.isfinite(delta)):
                     raise ValueError(f"{side}.{finger}: invalid signed optical depth delta")
+            if conditioned:
+                label = f"{side}.{finger}"
+                required = (
+                    "contact_active",
+                    "optical_depth_delta",
+                    "raw_optical_rgb",
+                    "raw_optical_depth",
+                    "raw_optical_depth_delta",
+                )
+                if any(field not in data for field in required):
+                    raise ValueError(f"{label}: incomplete contact-conditioned optical fields")
+                active = np.asarray(data.get("contact_active"))
+                if active.shape != () or active.dtype != np.bool_:
+                    raise ValueError(f"{label}: contact_active must be a scalar bool")
+                if data.get("provenance", {}).get("force_field_available") is False:
+                    raise ValueError(f"{label}: contact conditioning requires actual native force fields")
+                penetration = np.asarray(data["penetration_depth"])
+                if bool(active) != bool(np.any(penetration > 0)):
+                    raise ValueError(f"{label}: contact_active disagrees with native taxel penetration")
+                fields = (
+                    ("rgb", tactile_rgb),
+                    ("depth", tactile_depth),
+                    ("optical_depth_delta", np.asarray(data.get("optical_depth_delta"))),
+                )
+                for field, value in fields:
+                    raw = np.asarray(data.get("raw_optical_" + field.removeprefix("optical_")))
+                    if raw.shape != value.shape or raw.dtype != value.dtype or not np.all(np.isfinite(raw)):
+                        raise ValueError(f"{label}: invalid raw optical {field}")
+                    if field == "depth" and (np.any(raw < 0) or not np.any(raw > 0)):
+                        raise ValueError(f"{label}: raw optical depth must retain positive metric depth")
+                    if bool(active):
+                        if not np.array_equal(value, raw):
+                            raise ValueError(f"{label}: active contact image differs from original optical data")
+                    elif np.any(value != 0):
+                        raise ValueError(f"{label}: inactive contact image must contain only zero sentinels")
             for key, units in (
                 ("depth_units", "m"),
                 ("penetration_units", "m"),

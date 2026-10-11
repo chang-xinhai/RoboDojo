@@ -19,7 +19,16 @@ sys.path.insert(0, str(ROOT))
 from utils.multimodal import CAMERAS, json_value, read_frame, validate_multimodal
 from utils.multimodal_hdf5 import HDF5Reader
 
-MODES = ("rgb", "optical_depth_delta", "normal_force", "shear_force", "pad_normal", "pad_shear")
+MODES = (
+    "rgb",
+    "optical_depth_delta",
+    "normal_force",
+    "shear_force",
+    "pad_normal",
+    "pad_shear",
+    "raw_optical",
+    "raw_optical_depth_delta",
+)
 
 
 def metric_color(array, low, high):
@@ -114,10 +123,18 @@ def mosaic(
         lines = []
         for index, (finger, data) in enumerate(frame["tactile"][side].items()):
             label = f"{side}.{finger}"
-            paste(row, 2 * index, np.asarray(data["rgb"])[..., :3], label + " RGB")
-            field = {"rgb": "depth", "pad_normal": "pad_normal_force", "pad_shear": "pad_shear_force_xz"}.get(
-                mode, mode
-            )
+            raw_mode = mode in ("raw_optical", "raw_optical_depth_delta")
+            rgb = data.get("raw_optical_rgb") if raw_mode else data["rgb"]
+            if rgb is None:
+                rgb = np.zeros((2, 2, 3), np.uint8)
+            rgb_label = "raw optical RGB" if raw_mode else "contact RGB" if "contact_active" in data else "RGB"
+            paste(row, 2 * index, np.asarray(rgb)[..., :3], label + " " + rgb_label)
+            field = {
+                "rgb": "depth",
+                "pad_normal": "pad_normal_force",
+                "pad_shear": "pad_shear_force_xz",
+                "raw_optical": "raw_optical_depth",
+            }.get(mode, mode)
             if field not in data or data[field] is None:
                 array = np.zeros((2, 2, 3), np.uint8)
                 scale = None
@@ -128,6 +145,8 @@ def mosaic(
                 limits = {
                     "depth": (0, 0.05, "m optical depth"),
                     "optical_depth_delta": (-delta_limit, delta_limit, "m optical proxy"),
+                    "raw_optical_depth": (0, 0.05, "m raw optical depth"),
+                    "raw_optical_depth_delta": (-delta_limit, delta_limit, "m raw optical proxy"),
                     "normal_force": (-force_limit, force_limit, "N official taxel Z"),
                     "pad_normal_force": (-force_limit, force_limit, "N outward -Y"),
                     "pad_shear_force_xz": (0, shear_limit, "N body XZ magnitude"),
@@ -137,6 +156,8 @@ def mosaic(
                 array = metric_color(values, *scale[:2])
                 description = field
             paste(row, 2 * index + 1, array, label + " " + description, scale)
+            if "contact_active" in data:
+                lines += [f"{finger} tube contact: {bool(data['contact_active'])}"]
             if data["normal_force"] is None:
                 lines += [
                     finger,
@@ -262,12 +283,15 @@ def visualize(
 img{width:100%;max-width:1400px}input{width:65%}pre{white-space:pre-wrap}</style>
 <h1>RoboDojo synchronized multimodal recording</h1>
 <p>GT depth: RGB optical frame. SL depth: left IR optical frame. IR retains original exposure.
-TacSL optical delta is a signed camera-depth proxy, not FEM deformation.</p>
+TacSL optical delta is a signed camera-depth proxy, not FEM deformation.
+Contact-conditioned zero images mean no native tube contact; raw optical modes retain the rendered gel.</p>
 <button id="play">Play</button><input id="slider" type="range" min="0" value="0">
 <select id="mode"><option>rgb</option><option>optical_depth_delta</option>
 <option value="normal_force">official taxel Z</option><option value="shear_force">official taxel XY shear</option>
 <option value="pad_normal">pad outward -Y (compression negative)</option>
-<option value="pad_shear">pad body XZ shear</option></select><span id="counter"></span>
+<option value="pad_shear">pad body XZ shear</option>
+<option value="raw_optical">raw gel optical RGB / depth</option>
+<option value="raw_optical_depth_delta">raw gel optical depth delta</option></select><span id="counter"></span>
 <p><img id="picture"></p><details><summary>Per-frame calibration and provenance</summary>
 <pre id="details"></pre></details><script>const frames=[];</script>\n""")
             for index in indices:
@@ -317,7 +341,7 @@ TacSL optical delta is a signed camera-depth proxy, not FEM deformation.</p>
                     },
                     "tactile": {
                         side: {
-                            finger: {key: data.get(key) for key in ("metadata", "provenance")}
+                            finger: {key: data.get(key) for key in ("metadata", "provenance", "contact_active")}
                             for finger, data in fingers.items()
                         }
                         for side, fingers in frame["tactile"].items()

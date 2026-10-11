@@ -69,19 +69,53 @@ class Env:
         assert cfg.saved_layouts[0]["Rigid"]["test_object"], "Layout must exist before task construction"
         assert list(cfg.sim.seed) == [3] and kwargs["seed"] == 3
         assert cfg.eval_cfg.seed == 2 and cfg.eval_cfg.episode_seed == 3
-        assert [(robot.robot_name, robot.get("type", "target")) for robot in cfg.robot.robots] == [
-            ("x5", "target"), ("x5", "target"), ("franka", "support")]
+        expected = [("x5", "target"), ("x5", "target")]
+        if not mode.startswith("expert_"):
+            expected.append(("franka", "support"))
+        assert [(robot.robot_name, robot.get("type", "target")) for robot in cfg.robot.robots] == expected
+        if mode.startswith("expert_"):
+            assert cfg.tactile.contact_conditioned_observations is True
+            assert list(cfg.tactile.contact_object_labels) == ["tube0", "tube1", "tube2"]
+            class Rewards:
+                def init_state(self): pass
+                def call_func_parser(self, check, env_idx):
+                    return not (mode == "expert_official_failure" and check[0] == "axis_up")
+                def is_A_depth_in_B(self, **kwargs): return ("depth", kwargs)
+                def is_A_in_B(self, **kwargs): return ("in_slot", kwargs)
+                def is_axis_up(self, **kwargs): return ("axis_up", kwargs)
+                def all_robot_back_to_origin(self): return ("origin", {})
+            self.reward_manager = Rewards()
         assert all(robot.need_planner is False for robot in cfg.robot.robots)
         assert cfg.camera.default_frequency == 25
         self.lifecycle = []
         self.robot_manager = SimpleNamespace(
             set_origin_endpose=self.set_origin_endpose, set_robot_init_state=self.set_robot_init_state)
         objects = {} if mode == "empty_scene" else {"test": RigidObject(prim_path="/World/test")}
+        if mode.startswith("expert_"):
+            import numpy as np
+            objects = {f"test_{i}": RigidObject(prim_path=f"/World/test_{i}") for i in range(3)}
+            paths = [f"/World/test_{i}/mesh" for i in range(3)]
+            def sensor(path):
+                pose = np.array([[0., 0., 0., 0., 0., 0., 1.]], dtype=np.float32)
+                view = SimpleNamespace(count=1, get_transforms=lambda: pose.copy())
+                data = SimpleNamespace(tactile_normal_force=np.zeros((1, 8), np.float32),
+                    tactile_shear_force=np.zeros((1, 8, 2), np.float32),
+                    penetration_depth=np.zeros((1, 8), np.float32),
+                    tactile_points_pos_w=np.zeros((1, 8, 3), np.float32))
+                return SimpleNamespace(cfg=SimpleNamespace(contact_object_prim_path_expr=path),
+                    _data=data, _contact_object_body_view=view, _elastomer_body_view=view,
+                    raw_sdf=np.ones(8, np.float32))
+            self.tactile_manager = SimpleNamespace(contact_paths_by_env=[paths], sensors={
+                side: {finger: {0: [sensor(path) for path in paths]} for finger in ("finger_0", "finger_1")}
+                for side in ("left", "right")})
         self.scene_manager = SimpleNamespace(
             _rigid_and_dynamic_objects=[objects],
             stage=SimpleNamespace(GetPrimAtPath=lambda path: SimpleNamespace(IsValid=lambda: True)),
             apply_saved_poses=self.apply_saved_poses,
         )
+        if mode.startswith("expert_"):
+            self.scene_manager.layout_manager = SimpleNamespace(
+                get_instance_name=lambda env_idx, label: "test_" + label[-1])
         self.reset_complete = False
         self.placed = False
         self.sim = SimpleNamespace(sim=PhysicsContext())
@@ -170,13 +204,40 @@ if mode.startswith("contact_"):
             return {"phases_observed": sorted(self.phases), "synthetic_cpu_fixture": True}
         def close(self): pass
     contact_module.ContactMotionDemo = ContactController
+if mode.startswith("expert_"):
+    class ExpertController:
+        def __init__(self, env, args):
+            self.env = env
+            assert args.expert_trajectory.name == "official-commands.npz"
+            self.command = None
+        @property
+        def finished(self): return self.env.sim.sim.frame >= 3 and mode != "expert_timeout"
+        def configuration(self): return {"synthetic_cpu_fixture": True, "native_task_commands_only": True}
+        def apply(self, elapsed, physics_frame):
+            self.command = {"elapsed_time_s": elapsed, "issued_before_physics_frame": physics_frame}
+            if mode == "expert_advances_physics": self.env.sim_step()
+        def sample(self):
+            return {"physics_frame": self.env.sim.sim.frame,
+                    "timestamp_ns": round(self.env.sim.sim.frame * .04 * 1e9),
+                    "last_command": self.command}
+        def validate(self): return {"passed": mode != "expert_validation_failure"}
+    install("_test_expert", Controller=ExpertController)
+    import utils.native_contact_trace as trace_module
+    trace_module.query_native_sdf = lambda sensor: sensor.raw_sdf
+    trace_module.native_task_inventory = lambda env: {"synthetic_cpu_fixture": True,
+        "physics_frame": env.sim.sim.frame, "no_gpu_evidence": True}
 layout_file = Path(output) / "test-layout.json"
-layout_file.write_text('{"Rigid":{"test_object":[{}]}}')
+layout_file.write_text(json.dumps({"Rigid": {"test_object": [{}] * (3 if mode.startswith("expert_") else 1)}}))
 sys.argv = ["collect_multimodal.py", "--task", "make_kong", "--frames", "1", "--warmup-steps", "0", "--output", output,
             "--layout-file", str(layout_file), "--layout-id", "3", "--eval-seed", "2"]
 if mode.startswith("contact_"):
     sys.argv[sys.argv.index("--frames") + 1] = "2" if mode == "contact_short" else "100"
     sys.argv.append("--contact-demo")
+if mode.startswith("expert_"):
+    sys.argv[sys.argv.index("--task") + 1] = "insert_tubes"
+    sys.argv[sys.argv.index("--frames") + 1] = "6"
+    sys.argv += ["--expert-controller", "_test_expert:Controller",
+                 "--expert-trajectory", str(Path(output) / "official-commands.npz")]
 if mode == "visualization_failure":
     sys.argv.append("--visualize")
 runpy.run_path("reproduction/collect_multimodal.py", run_name="__main__")
@@ -192,6 +253,43 @@ class CollectorExitTests(unittest.TestCase):
             text=True,
             timeout=30,
         )
+
+    def test_expert_episode_initial_and_terminal_capture_and_official_validation(self):
+        from utils.multimodal_hdf5 import HDF5Reader
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_collector("expert_success", directory)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with HDF5Reader(Path(directory) / "episode.hdf5") as reader:
+                self.assertEqual(len(reader), 4)
+                first, last = reader.read_frame(0), reader.read_frame(3)
+                self.assertEqual(first["sync"]["physics_frame"], 0)
+                self.assertIsNone(first["action"]["expert_controller"]["last_command"])
+                self.assertEqual(last["sync"]["physics_frame"], 3)
+                validation = reader.metadata["validation"]["expert_episode"]
+                self.assertTrue(validation["passed"])
+                self.assertTrue(validation["official_terminal_predicates"]["all_robot_back_to_origin"])
+                self.assertEqual(
+                    sum(
+                        len(validation["official_terminal_predicates"][label]) for label in ("tube0", "tube1", "tube2")
+                    ),
+                    9,
+                )
+                self.assertFalse(reader.metadata["run"]["contact_demo"]["enabled"])
+
+    def test_expert_timeout_unqualified_result_and_hidden_physics_step_reject_completion(self):
+        for mode, reason in (
+            ("expert_timeout", "maximum recording frames"),
+            ("expert_validation_failure", "successful complete episode"),
+            ("expert_official_failure", "terminal predicates failed"),
+            ("expert_advances_physics", "advanced physics outside"),
+        ):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                result = self.run_collector(mode, directory)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(reason, result.stderr)
+                self.assertFalse((Path(directory) / "episode.hdf5").exists())
+                self.assertFalse((Path(directory) / "validation.json").exists())
 
     def test_successful_capture_reports_zero_and_writes_validation(self):
         with tempfile.TemporaryDirectory() as directory:

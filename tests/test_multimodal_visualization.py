@@ -63,7 +63,8 @@ assert.equal(Number(elements.slider.value), 1);
 assert.equal(elements.mode.value, 'rgb');
 assert.equal(JSON.parse(elements.details.textContent).sync.physics_frame, 2);
 assert.equal(elements.picture.src, vm.runInContext('frames[1].views.rgb', sandbox));
-const modes = ['rgb', 'optical_depth_delta', 'normal_force', 'shear_force', 'pad_normal', 'pad_shear'];
+const modes = ['rgb', 'optical_depth_delta', 'normal_force', 'shear_force', 'pad_normal', 'pad_shear',
+  'raw_optical', 'raw_optical_depth_delta'];
 for (const mode of modes) {
   elements.mode.value = mode;
   elements.mode.onchange();
@@ -146,7 +147,16 @@ class VisualizationTests(unittest.TestCase):
                 self.assertEqual(payload["details"]["sync"]["physics_frame"], index + 1)
                 self.assertEqual(
                     set(payload["views"]),
-                    {"rgb", "optical_depth_delta", "normal_force", "shear_force", "pad_normal", "pad_shear"},
+                    {
+                        "rgb",
+                        "optical_depth_delta",
+                        "normal_force",
+                        "shear_force",
+                        "pad_normal",
+                        "pad_shear",
+                        "raw_optical",
+                        "raw_optical_depth_delta",
+                    },
                 )
                 self.assertEqual(
                     payload["details"]["vision"]["head"]["provenance"]["untrusted"],
