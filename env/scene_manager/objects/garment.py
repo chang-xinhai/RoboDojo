@@ -15,7 +15,12 @@ from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade, Vt
 import torch
 
 from utils.physx_callback import invoke_physx_callback
-from utils.surface_deformable import migrate_known_garment_physics, surface_material_parameters, triangulate_faces
+from utils.surface_deformable import (
+    migrate_known_garment_physics,
+    surface_material_parameters,
+    triangulate_faces,
+    weld_exact_surface_seams,
+)
 
 
 class GarmentObject(SingleXFormPrim):
@@ -65,11 +70,15 @@ class GarmentObject(SingleXFormPrim):
             raise ValueError("Garment hole faces require explicit asset conversion")
         self._triangulate_mesh()
         self._rest_points = np.asarray(self._mesh.GetPointsAttr().Get(), dtype=np.float32).copy()
+        self.original_vertex_count = len(self._rest_points)
+        self._original_to_simulation = np.arange(self.original_vertex_count)
+        if self.physics_migration:
+            self._weld_known_seams()
         physics = dict(self.physics_cfg)
         physics["interaction_with_fluid"] = inst_config.get(
             "interaction_with_fluid", physics.get("interaction_with_fluid", False)
         )
-        self.surface_parameters = surface_material_parameters(physics, len(self._rest_points))
+        self.surface_parameters = surface_material_parameters(physics, self.original_vertex_count)
         super().__init__(
             prim_path=prim_path,
             name=prim_path,
@@ -167,6 +176,43 @@ class GarmentObject(SingleXFormPrim):
             UsdShade.Material(prim), UsdShade.Tokens.weakerThanDescendants, "physics"
         )
 
+    def _weld_known_seams(self):
+        indices = np.asarray(self._mesh.GetFaceVertexIndicesAttr().Get(), dtype=np.int64)
+        points, triangles, mapping, representatives = weld_exact_surface_seams(self._rest_points, indices)
+        if len(points) == self.original_vertex_count:
+            return
+        # Bundled UVs and normals are per-corner, so welding does not alter
+        # their seams. Preserve any per-vertex primvar as per-corner data too.
+        for pv in UsdGeom.PrimvarsAPI(self._mesh).GetPrimvars():
+            if pv.GetInterpolation() in ("vertex", "varying"):
+                attr = pv.GetIndicesAttr() if pv.IsIndexed() else pv.GetAttr()
+                values = attr.Get()
+                if values:
+                    attr.Set(type(values)([values[int(i)] for i in indices]))
+                    pv.SetInterpolation("faceVarying")
+        normals = self._mesh.GetNormalsAttr().Get()
+        if normals and self._mesh.GetNormalsInterpolation() in ("vertex", "varying"):
+            self._mesh.GetNormalsAttr().Set(Vt.Vec3fArray([normals[int(i)] for i in indices]))
+            self._mesh.SetNormalsInterpolation("faceVarying")
+        self._mesh.GetPointsAttr().Set(Vt.Vec3fArray.FromNumpy(points))
+        self._mesh.GetFaceVertexIndicesAttr().Set(Vt.IntArray(triangles.tolist()))
+        velocities = self._mesh.GetVelocitiesAttr().Get()
+        if velocities:
+            self._mesh.GetVelocitiesAttr().Set(Vt.Vec3fArray([velocities[int(i)] for i in representatives]))
+        self._rest_points = points
+        self._original_to_simulation = mapping
+        self._mesh.GetPrim().CreateAttribute(
+            "robodojo:originalVertexToSimulationNode", Sdf.ValueTypeNames.IntArray
+        ).Set(Vt.IntArray(mapping.tolist()))
+        self.physics_migration["exact_seam_welding"] = {
+            "source_vertices": self.original_vertex_count,
+            "simulation_nodes": len(points),
+            "welded_vertices": self.original_vertex_count - len(points),
+            "tolerance_m": 0.0,
+            "semantic_vertex_order": "original IDs expanded from native FEM nodes",
+            "mapping_attribute": "robodojo:originalVertexToSimulationNode",
+        }
+
     def initialize(self):
         # Lab 3's global view uses Warp. Keep this wrapper's frontend explicitly torch.
         self._surface_sim_view = tensors.create_simulation_view(
@@ -174,7 +220,7 @@ class GarmentObject(SingleXFormPrim):
         )
         self._surface_sim_view.set_subspace_roots("/")
         self._surface_view = self._surface_sim_view.create_surface_deformable_body_view(self.mesh_prim_path)
-        if self._surface_view.count != 1:
+        if getattr(self._surface_view, "_backend", None) is None or self._surface_view.count != 1:
             raise RuntimeError(f"No unique live surface deformable at {self.mesh_prim_path}")
         # The official Lab 3 wrapper warns on check() instead of rejecting a
         # view. Record it; actual buffer access and motion tests establish validity.
@@ -261,6 +307,10 @@ class GarmentObject(SingleXFormPrim):
         else:
             local = np.asarray(self._mesh.GetPointsAttr().Get(), dtype=np.float32)
             world = self._world_points(local)
+        # Fold rewards reference source USD vertex IDs. Every source seam ID
+        # reads its genuine welded FEM node; never change the semantic indexing.
+        mapping = self._original_to_simulation
+        world, local = world[mapping], local[mapping]
         pos, ori = self.get_world_pose()
         return world, local, pos, ori
 

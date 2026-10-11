@@ -60,6 +60,29 @@ retains the real surface solver, elastic constraints and contact response.
 Explicit new `surface_material.gravity_scale` values support finite nonnegative
 scaling; arbitrary nonzero legacy scaling is not implicitly accepted.
 
+The bundled Top_Long models 00004, 00007 and 00009 contain exactly coincident
+vertices at panel seams. PhysX triangle-mesh validation rejects duplicate
+vertices, so these named assets now weld only exactly equal XYZ positions before
+authoring FEM physics. The simulation removes respectively 32, 40 and 40 duplicate
+nodes, joins the panels, and keeps the original source mass. Face-corner UVs and
+normals remain unchanged. This is an explicitly recorded topology conversion,
+not approximate remeshing or substitution of another garment model.
+
+`sample_mesh_vertices()` expands genuine live FEM nodes back into the original
+source vertex order, preserving every metadata/reward landmark ID. The USD
+`robodojo:originalVertexToSimulationNode` integer array stores the complete
+mapping; `physics_migration.exact_seam_welding` records source/simulation counts,
+zero tolerance, and the semantic indexing contract. Unknown assets are not
+automatically welded. Collapsed triangles, duplicate triangles and nonmanifold
+edges after welding are rejected rather than silently removed.
+
+All six original bundled models passed actual Isaac Sim 6.1 GPU motion, rigid
+ground contact, zero-velocity nodal reset, next-step gravity acceleration and RGB
+reset-projection checks after this conversion. Reports are retained in
+`reproduction/isaac61/outputs/scene-seam-00001-61` through the corresponding
+`scene-seam-00011-61` directories for IDs 1, 4, 6, 7, 9 and 11. These standalone
+checks complement the separate canonical fold task/reward integration tests.
+
 The following old behaviors have no direct replacement and raise explicit
 `NotImplementedError`: nonzero wind/lift/drag; cloth PBD adhesion, cohesion,
 viscosity, vorticity and surface tension; uncalibrated legacy gravity scaling; shared
@@ -88,6 +111,7 @@ Run CPU geometry/configuration tests with:
 
 ```sh
 .venv-isaac61/bin/python -m pytest tests/test_surface_deformable.py tests/test_surface_reset_contract.py -q
+.venv-isaac61/bin/python -m pytest tests/test_surface_seams.py -q
 ```
 
 Run actual GPU motion/reset checks with:
@@ -131,3 +155,4 @@ Official references:
 
 - [Omni Physics 110.1 deformable migration guide](https://docs.omniverse.nvidia.com/kit/docs/omni_physics/110.1/dev_guide/deformables/deformable_migration.html)
 - [Omni Physics 110.1 deformable bodies](https://docs.omniverse.nvidia.com/kit/docs/omni_physics/110.1/dev_guide/deformables/deformable_bodies.html)
+- [PhysX triangle mesh validation requirements](https://nvidia-omniverse.github.io/PhysX/physx/5.4.0/_api_build/function__px_cooking_8h_1ac4d006397ab50386ae2913e7d2f4464d.html)

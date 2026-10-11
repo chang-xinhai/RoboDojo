@@ -159,6 +159,7 @@ def main():
             "physics_migration": cloth.physics_migration,
             "surface_parameters": cloth.surface_parameters,
             "cloth_nodes": len(before),
+            "cloth_simulation_nodes": int(cloth._surface_view.get_simulation_nodal_positions().shape[1]),
             "cpu_readback_requested": args.cpu_readback,
             "crossenv_offset_m": crossenv_delta.tolist(),
             "cloth_drop_m": float(np.mean(before[:, 2] - after[:, 2])),
@@ -192,7 +193,9 @@ def main():
         cloth.init_pos = (0.1, 0.1, 0.8)
         cloth.apply_saved_pose()
         restored = cloth.sample_mesh_vertices()[0]
-        report["cloth_reset_max_error_m"] = float(np.max(np.abs(restored - cloth._world_reset_points())))
+        report["cloth_reset_max_error_m"] = float(
+            np.max(np.abs(restored - cloth._world_reset_points()[cloth._original_to_simulation]))
+        )
         velocity = cloth._surface_view.get_simulation_nodal_velocities().detach().cpu().numpy()
         report["cloth_reset_max_velocity"] = float(np.max(np.abs(velocity)))
         assert report["cloth_reset_max_error_m"] < 1e-5, report

@@ -9,6 +9,40 @@ import numpy as np
 _ROBO_DOJO_TOP_LONG = {"00001", "00004", "00006", "00007", "00009", "00011"}
 
 
+def weld_exact_surface_seams(points, triangles):
+    """Join exactly coincident seam vertices and retain every source vertex ID.
+
+    Returns compact simulation points/indices, an original-to-simulation map,
+    and source representatives. No distance tolerance or geometric remeshing is
+    used. Callers must opt in for an asset whose duplicate vertices are seams.
+    """
+    points = np.asarray(points, dtype=np.float32)
+    triangles = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
+    if points.ndim != 2 or points.shape[1] != 3 or not np.isfinite(points).all():
+        raise ValueError("Surface seam welding requires finite XYZ points")
+    if triangles.size == 0 or np.any(triangles < 0) or np.any(triangles >= len(points)):
+        raise ValueError("Surface seam welding requires valid triangle indices")
+    # np.unique sorts coordinates. Preserve first-occurrence source order so
+    # identity meshes keep their original node ordering.
+    _, first, inverse = np.unique(points, axis=0, return_index=True, return_inverse=True)
+    order = np.argsort(first)
+    representatives = first[order]
+    sorted_to_stable = np.empty(len(first), dtype=np.int64)
+    sorted_to_stable[order] = np.arange(len(first))
+    original_to_simulation = sorted_to_stable[inverse]
+    indices = original_to_simulation[triangles]
+    simulation_points = points[representatives].copy()
+    a, b, c = np.moveaxis(simulation_points[indices], 1, 0)
+    if np.any(np.linalg.norm(np.cross(b - a, c - a), axis=1) == 0):
+        raise ValueError("Welding coincident surface seams would create degenerate triangles")
+    if len(np.unique(np.sort(indices, axis=1), axis=0)) != len(indices):
+        raise ValueError("Welding coincident surface seams would create duplicate triangles")
+    edges = np.sort(np.concatenate([indices[:, [0, 1]], indices[:, [1, 2]], indices[:, [2, 0]]]), axis=1)
+    if np.any(np.unique(edges, axis=0, return_counts=True)[1] > 2):
+        raise ValueError("Welding coincident surface seams would create a nonmanifold edge")
+    return simulation_points, indices.reshape(-1), original_to_simulation, representatives
+
+
 def migrate_known_garment_physics(physics_cfg, usd_path):
     """Explicitly migrate the bundled Top_Long particle-cloth material.
 
