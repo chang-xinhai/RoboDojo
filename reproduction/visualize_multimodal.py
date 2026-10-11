@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import nullcontext
 import hashlib
 import html
 import io
@@ -239,6 +240,7 @@ def visualize(
     force_limit=0.5,
     shear_limit=0.2,
     tactile="rgb",
+    include_html=True,
 ):
     if tactile not in MODES:
         raise ValueError("Unsupported tactile display mode")
@@ -271,14 +273,15 @@ def visualize(
         from utils.save_file import VideoStreamWriter
 
         best_score, selected = -1, None
-        with html_path.open("w") as document:
-            document.write('<!doctype html><meta charset="utf-8">')
-            document.write(
-                "<details><summary>Recording status, source and runtime settings</summary><pre>"
-                + html.escape(json.dumps(json_value(reader.metadata), indent=2))
-                + "</pre></details>"
-            )
-            document.write("""<title>RoboDojo HDF5 viewer</title>
+        with html_path.open("w") if include_html else nullcontext(None) as document:
+            if document is not None:
+                document.write('<!doctype html><meta charset="utf-8">')
+                document.write(
+                    "<details><summary>Recording status, source and runtime settings</summary><pre>"
+                    + html.escape(json.dumps(json_value(reader.metadata), indent=2))
+                    + "</pre></details>"
+                )
+                document.write("""<title>RoboDojo HDF5 viewer</title>
 <style>body{background:#111827;color:#eef;font:16px system-ui;margin:24px}
 img{width:100%;max-width:1400px}input{width:65%}pre{white-space:pre-wrap}</style>
 <h1>RoboDojo synchronized multimodal recording</h1>
@@ -312,6 +315,8 @@ Contact-conditioned zero images mean no native tube contact; raw optical modes r
                     best_score = score
                     selected = {"index": index, **frame["sync"], "score": score, "score_semantics": semantics}
                     picture.save(png)
+                if document is None:
+                    continue
                 # Each frame is a separate bounded script. A full-episode JavaScript
                 # string can exceed V8's limit even though Python streams the HTML.
                 # Encode one mode at a time directly to disk, retaining standalone HTML.
@@ -351,14 +356,15 @@ Contact-conditioned zero images mean no native tube contact; raw optical modes r
                 document.write(
                     '},"details":' + json.dumps(json_value(details)).replace("<", "\\u003c") + "});</script>\n"
                 )
-            document.write(
-                "<script>const selectedPreviewIndex="
-                + str(indices.index(selected["index"]))
-                + ";const initialTactileMode="
-                + json.dumps(tactile)
-                + ";\n"
-            )
-            document.write("""
+            if document is not None:
+                document.write(
+                    "<script>const selectedPreviewIndex="
+                    + str(indices.index(selected["index"]))
+                    + ";const initialTactileMode="
+                    + json.dumps(tactile)
+                    + ";\n"
+                )
+                document.write("""
 const slider=document.getElementById('slider'),mode=document.getElementById('mode');
 slider.max=frames.length-1;slider.value=selectedPreviewIndex;mode.value=initialTactileMode;
 function show(){const i=Number(slider.value);document.getElementById('picture').src=frames[i].views[mode.value];
@@ -371,7 +377,7 @@ else{timer=setInterval(()=>{slider.value=(Number(slider.value)+1)%frames.length;
         report = {
             "png": str(png.resolve()),
             "video": str(video.resolve()),
-            "html": str(html_path.resolve()),
+            "html": str(html_path.resolve()) if include_html else None,
             "frames": len(indices),
             "source_format": "hdf5" if isinstance(reader, HDF5Reader) else "legacy_npz",
             "source_hdf5": str(source.resolve()) if isinstance(reader, HDF5Reader) else None,
@@ -399,6 +405,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path, help="episode.hdf5 or legacy recording directory")
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--video-only",
+        dest="include_html",
+        action="store_false",
+        help="Stream only the selected-mode MP4 and strongest-contact PNG, without HTML images",
+    )
     parser.add_argument("--frame-stride", type=int, default=1)
     parser.add_argument("--max-frames", type=int)
     parser.add_argument("--depth-min", type=float, default=0.1)

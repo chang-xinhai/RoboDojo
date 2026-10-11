@@ -7,11 +7,12 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
 from reproduction.convert_multimodal_hdf5 import convert
-from reproduction.visualize_multimodal import _taxels, letterbox, metric_color, visualize
+from reproduction.visualize_multimodal import _taxels, letterbox, metric_color, mosaic, visualize
 from tests.test_multimodal import fixture
 from utils.multimodal import MultimodalWriter
 from utils.multimodal_hdf5 import HDF5Reader, HDF5Writer
@@ -194,3 +195,47 @@ class VisualizationTests(unittest.TestCase):
                 self.assertTrue(metadata["format_conversion"]["conversion_only"])
                 self.assertTrue(metadata["format_conversion"]["original_files"]["frame_000000.npz"])
             self.assertTrue((Path(directory) / "frame_000000.npz").exists())
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "Video tools required")
+    def test_video_only_preserves_all_frames_timing_and_contact_without_html_modes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            with HDF5Writer(directory / "source", {"synthetic_cpu_fixture": True}) as writer:
+                for index in range(1, 6):
+                    frame = fixture(index)
+                    frame["tactile"]["right"]["finger_1"]["normal_force"][0] = 0.3 if index == 4 else 0
+                    writer.append(frame)
+            output = directory / "video-only"
+            with patch("reproduction.visualize_multimodal.mosaic", wraps=mosaic) as renderer:
+                report = visualize(writer.path, output, include_html=False, tactile="normal_force")
+            self.assertEqual(renderer.call_count, 5)  # Only the requested mode; no eight-mode HTML encoding.
+            self.assertEqual(report["frames"], 5)
+            self.assertEqual(report["selected_frame"]["index"], 3)
+            self.assertEqual(report["selected_frame"]["physics_frame"], 4)
+            self.assertEqual(report["tactile_display_mode"], "normal_force")
+            self.assertIsNone(report["html"])
+            self.assertFalse((output / "multimodal.html").exists())
+            self.assertTrue(Path(report["png"]).is_file())
+            self.assertEqual(json.loads((output / "visualization.json").read_text()), report)
+            probe = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-count_frames",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=nb_read_frames,r_frame_rate,duration",
+                    "-of",
+                    "json",
+                    report["video"],
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            stream = json.loads(probe.stdout)["streams"][0]
+            self.assertEqual(int(stream["nb_read_frames"]), 5)
+            self.assertEqual(stream["r_frame_rate"], "25/1")
+            self.assertAlmostEqual(float(stream["duration"]), 0.2)
