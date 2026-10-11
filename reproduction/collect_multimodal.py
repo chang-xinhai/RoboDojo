@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import sys
 
@@ -25,6 +26,11 @@ parser.add_argument("--frames", type=int, default=5)
 parser.add_argument("--warmup-steps", type=int, default=10)
 parser.add_argument("--output", type=Path, default=ROOT / "reproduction" / "isaac61" / "outputs" / "multimodal-capture")
 parser.add_argument("--visualize", action="store_true")
+parser.add_argument(
+    "--also-npz", action="store_true", help="Optional legacy frame NPZ export alongside canonical HDF5."
+)
+parser.add_argument("--contact-demo", action="store_true", help="Real kinematic calibration nuts; not a policy grasp.")
+parser.add_argument("--contact-phase-duration", type=float, default=0.4)
 parser.add_argument("--enable-planner", action="store_true", help="Also initialize production planners.")
 parser.add_argument(
     "--motion-demo", action="store_true", help="Command both wrist joints with a small real sine motion."
@@ -47,6 +53,12 @@ if args.motion_demo and (
     args.frames < 2 or not 0 < args.motion_amplitude <= 0.05 or not 0 < args.motion_frequency <= 1.0
 ):
     parser.error("motion-demo requires frames>=2, amplitude in (0,0.05] rad and frequency in (0,1] Hz")
+if args.contact_demo and args.motion_demo:
+    parser.error("contact-demo and motion-demo are mutually exclusive")
+if args.contact_demo and (
+    not math.isfinite(args.contact_phase_duration) or args.contact_phase_duration <= 0 or args.frames < 2
+):
+    parser.error("contact-demo needs positive phase-duration and >=2 frames")
 args.enable_cameras = True
 from env.camera_manager.capture.render_sync import add_zero_delay_kit_args
 
@@ -54,6 +66,8 @@ add_zero_delay_kit_args(args)
 launcher = AppLauncher(args)
 app = launcher.app
 success = False
+writer = None
+npz_writer = None
 try:
     from utils.isaaclab_compat import enable_legacy_isaacsim_extensions, simulation_snapshot
 
@@ -65,6 +79,7 @@ try:
     from task.RoboDojo.task_registry import load_task_class
     from utils.load_file import load_yaml
     from utils.multimodal import MultimodalWriter, json_value, write_failed_capture
+    from utils.multimodal_hdf5 import HDF5Reader, HDF5Writer, validate_hdf5
     from utils.task_layout import load_task_layout, verify_task_scene
     from utils.task_runtime_config import configure_task_runtime, reset_task_episode
 
@@ -90,6 +105,15 @@ try:
     runtime_profile = configure_task_runtime(
         cfg, task_name, args.env_cfg, eval_cfg, layout_provenance, enable_planner=args.enable_planner
     )
+    contact_config = None
+    if args.contact_demo:
+        # Calibration profile only: production grasping keeps its configured stiffness.
+        cfg.tactile.compliance_stiffness = 100.0
+        cfg.tactile.array_size = [20, 25]
+        from utils.contact_demo import ContactDemoConfig, ContactMotionDemo, contact_demo_task_class
+
+        contact_config = ContactDemoConfig(phase_duration_s=args.contact_phase_duration)
+        task_class = contact_demo_task_class(task_class, contact_config)
     env = task_class(cfg, app, seed=runtime_profile["episode_seed"])
     reset_task_episode(env, runtime_profile)
     scene_validation = verify_task_scene(env.scene_manager, layout)
@@ -101,6 +125,13 @@ try:
         raise ValueError("Collector requires observation.multimodal=true; use arx_x5_multimodal")
     obs = ObsManager(obs_cfg, 1, env.dt, args.task, {}, seeds_per_env=env.env_seed_list)
     obs.initialize(env)
+    if contact_config:
+        collection_period = int(obs.collect_interval) * env.dt
+        if collection_period <= 0 or collection_period >= contact_config.phase_duration_s:
+            raise ValueError("Contact capture interval must be shorter than each contact phase")
+        if args.frames * collection_period < contact_config.duration_s - 1e-9:
+            required = math.ceil(contact_config.duration_s / collection_period - 1e-9)
+            raise ValueError(f"Contact sequence requires at least {required} frames at this collection frequency")
     for _ in range(args.warmup_steps):
         env.sim_step(render=False)
     motion = None
@@ -110,7 +141,13 @@ try:
 
         motion = WristMotionDemo(env.robot_manager, args.motion_amplitude, args.motion_frequency)
         motion_start_time, _ = simulation_snapshot(env.sim.sim)
-    writer = MultimodalWriter(
+    contact = None
+    if args.contact_demo:
+        contact = ContactMotionDemo(env.contact_fixtures, env.tactile_manager, env.sim.sim)
+        contact_start_time, _ = simulation_snapshot(env.sim.sim)
+    from utils.recording_provenance import capture_provenance
+
+    writer = HDF5Writer(
         args.output,
         {
             "task": args.task,
@@ -121,8 +158,13 @@ try:
             "layout": layout_provenance,
             "scene": scene_validation,
             "motion_demo": motion.configuration() if motion else {"enabled": False},
+            "contact_demo": contact.configuration() if contact else {"enabled": False},
+            "resolved_configuration": OmegaConf.to_container(cfg, resolve=True),
+            "capture_provenance": capture_provenance(ROOT),
         },
     )
+    if args.also_npz:
+        npz_writer = MultimodalWriter(args.output, writer.run_metadata)
     reports = []
     for index in range(args.frames):
         # Integer stepping preserves requested simulated collection frequency.
@@ -130,10 +172,18 @@ try:
             if motion:
                 current_time, current_frame = simulation_snapshot(env.sim.sim)
                 motion.apply(current_time + env.dt - motion_start_time, current_frame)
+            if contact:
+                current_time, current_frame = simulation_snapshot(env.sim.sim)
+                contact.apply(current_time + env.dt - contact_start_time, current_frame)
             env.sim_step(render=False)
         frame = obs.get_obs()[0]
         if motion:
             frame["action"]["motion_demo"] = motion.sample()
+        if contact:
+            sample = contact.sample()
+            if any(sample[key] != frame["sync"][key] for key in ("physics_frame", "timestamp_ns")):
+                raise RuntimeError("Contact state and sensors do not share the same physics clock")
+            frame["action"]["contact_demo"] = sample
         quality = {}
         for name, camera in frame["vision"].items():
             valid = np.isfinite(camera["depth_sl"]) & (camera["depth_sl"] > 0)
@@ -155,10 +205,14 @@ try:
                 "ir_left_nonzero_fraction": float((camera["ir_left"] > 0).mean()),
                 "ir_right_nonzero_fraction": float((camera["ir_right"] > 0).mean()),
             }
-        path = writer.append(frame)
+        writer.append(frame)
+        if npz_writer:
+            npz_writer.append(frame)
         report = {
             "index": index,
-            "file": str(path),
+            "file": str(writer.path),
+            "storage": "hdf5",
+            "hdf5_frame": index,
             **frame["sync"],
             "modalities": {
                 name: {k: list(v.shape) for k, v in cam.items() if hasattr(v, "shape")}
@@ -186,31 +240,62 @@ try:
     writer.run_metadata.update(
         scene_initial=scene_validation, scene_final=final_scene_validation, scene=final_scene_validation
     )
-    writer.close()
+    contact_validation = contact.validate() if contact else {"enabled": False}
+    writer.run_metadata["contact_demo_validation"] = contact_validation
+    writer.seal()
+    if contact:
+        contact.close()
     env.close()
+    validation = {
+        "status": "passed",
+        "real_runtime": True,
+        "frames": reports,
+        "layout": layout_provenance,
+        "runtime_profile": runtime_profile,
+        "scene": final_scene_validation,
+        "scene_initial": scene_validation,
+        "scene_final": final_scene_validation,
+        "motion_demo": motion_validation,
+        "contact_demo": contact_validation,
+    }
+    episode = writer.complete(validation=validation)
+    hdf5_validation = validate_hdf5(episode)
+    import hashlib
+
+    with episode.open("rb") as stream:
+        hdf5_validation.update(
+            source_hdf5=str(episode.resolve()), source_hdf5_sha256=hashlib.file_digest(stream, "sha256").hexdigest()
+        )
+    (args.output / "hdf5-validation.json").write_text(json.dumps(hdf5_validation, indent=2) + "\n")
     if args.visualize:
         from reproduction.visualize_multimodal import visualize
 
-        print(json.dumps(visualize(args.output)), flush=True)
-    (args.output / "validation.json").write_text(
-        json.dumps(
-            {
-                "status": "passed",
-                "real_runtime": True,
-                "frames": reports,
-                "layout": layout_provenance,
-                "runtime_profile": runtime_profile,
-                "scene": final_scene_validation,
-                "scene_initial": scene_validation,
-                "scene_final": final_scene_validation,
-                "motion_demo": motion_validation,
-            },
-            indent=2,
-        )
-        + "\n"
-    )
+        print(json.dumps(visualize(episode)), flush=True)
+    (args.output / "validation.json").write_text(json.dumps(validation, indent=2) + "\n")
+    with HDF5Reader(episode) as reader:
+        manifest = {
+            "schema": "robodojo.multimodal.v1",
+            "storage": "hdf5",
+            "complete": True,
+            "file": episode.name,
+            "run": json_value(writer.run_metadata),
+            "frames": [{"file": episode.name, "hdf5_frame": i, **reader.sync(i)} for i in range(len(reader))],
+        }
+    if npz_writer:
+        npz_writer.close()
+        manifest["legacy_npz"] = True
+    (args.output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     success = True
-except BaseException:
+except BaseException as error:
+    if writer is not None:
+        try:
+            writer.fail(error)
+        except BaseException:
+            import traceback
+
+            traceback.print_exc()
+        for filename in ("manifest.json", "validation.json", "hdf5-validation.json"):
+            (args.output / filename).unlink(missing_ok=True)
     # SimulationApp may exit the process directly during cleanup; print the
     # active error before close and preserve its failure status explicitly.
     import traceback

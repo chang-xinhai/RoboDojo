@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 from utils.multimodal import CAMERAS, json_value, read_frame, validate_multimodal
 from utils.multimodal_hdf5 import HDF5Reader
 
-MODES = ("rgb", "optical_depth_delta", "normal_force", "shear_force")
+MODES = ("rgb", "optical_depth_delta", "normal_force", "shear_force", "pad_normal", "pad_shear")
 
 
 def metric_color(array, low, high):
@@ -46,13 +46,18 @@ def letterbox(array, size):
 
 def _taxels(data, field):
     values = np.asarray(data[field])
-    if field == "shear_force":
+    if field in ("shear_force", "pad_shear_force_xz"):
         values = np.linalg.norm(values, axis=-1)
     shape = data.get("metadata", {}).get("array_size") or data.get("provenance", {}).get("array_size")
     if shape is None or np.prod(shape) != values.size:
         # Unspecified layout is shown as a strip, never an invented spatial grid.
         shape = (1, values.size)
-    return values.reshape(tuple(shape))
+    grid = values.reshape(tuple(shape))
+    axes = data.get("metadata", {}).get("taxel_array_axes")
+    if axes == ["sensor_local_x", "sensor_local_z"]:
+        # Official C ordering is x outer/z inner; image rows represent z.
+        return grid.T
+    return grid
 
 
 def mosaic(
@@ -110,17 +115,22 @@ def mosaic(
         for index, (finger, data) in enumerate(frame["tactile"][side].items()):
             label = f"{side}.{finger}"
             paste(row, 2 * index, np.asarray(data["rgb"])[..., :3], label + " RGB")
-            field = "depth" if mode == "rgb" else mode
+            field = {"rgb": "depth", "pad_normal": "pad_normal_force", "pad_shear": "pad_shear_force_xz"}.get(
+                mode, mode
+            )
             if field not in data or data[field] is None:
                 array = np.zeros((2, 2, 3), np.uint8)
                 scale = None
                 description = "unavailable (see provenance)"
             else:
-                values = _taxels(data, field) if field in ("normal_force", "shear_force") else data[field]
+                force_fields = ("normal_force", "shear_force", "pad_normal_force", "pad_shear_force_xz")
+                values = _taxels(data, field) if field in force_fields else data[field]
                 limits = {
                     "depth": (0, 0.05, "m optical depth"),
                     "optical_depth_delta": (-delta_limit, delta_limit, "m optical proxy"),
-                    "normal_force": (-force_limit, force_limit, "N"),
+                    "normal_force": (-force_limit, force_limit, "N official taxel Z"),
+                    "pad_normal_force": (-force_limit, force_limit, "N outward -Y"),
+                    "pad_shear_force_xz": (0, shear_limit, "N body XZ magnitude"),
                     "shear_force": (0, shear_limit, "N magnitude"),
                 }
                 scale = limits[field]
@@ -137,10 +147,16 @@ def mosaic(
             else:
                 lines += [
                     finger,
-                    f"max normal {np.max(data['normal_force']):.5g} N",
-                    f"max shear {np.max(np.linalg.norm(data['shear_force'], axis=-1)):.5g} N",
+                    f"official taxel Z max {np.max(data['normal_force']):.5g} N",
+                    f"official XY shear max {np.max(np.linalg.norm(data['shear_force'], axis=-1)):.5g} N",
                     "",
                 ]
+                if data.get("pad_normal_force") is not None:
+                    lines += [
+                        f"gel outward -Y min {np.min(data['pad_normal_force']):.5g} N",
+                        "compression is negative",
+                        "",
+                    ]
         draw.multiline_text((4 * tile_width + 8, header + row * tile_height + 8), "\n".join(lines), fill="#c1e6d3")
     return canvas
 
@@ -165,6 +181,14 @@ class LegacyReader:
 
 
 def _score(frame):
+    pad = [
+        float(np.max(np.abs(data["pad_normal_force"])))
+        for fingers in frame["tactile"].values()
+        for data in fingers.values()
+        if data.get("pad_normal_force") is not None
+    ]
+    if pad:
+        return max(pad), "maximum absolute signed gel outward -Y force estimate (N)"
     forces = [
         float(np.max(np.abs(data["normal_force"])))
         for fingers in frame["tactile"].values()
@@ -172,7 +196,7 @@ def _score(frame):
         if data["normal_force"] is not None
     ]
     if forces:
-        return max(forces), "maximum absolute measured normal force (N)"
+        return max(forces), "maximum absolute official TacSL taxel Z estimate (N)"
     deltas = [
         float(np.max(np.abs(data["optical_depth_delta"])))
         for fingers in frame["tactile"].values()
@@ -193,7 +217,10 @@ def visualize(
     delta_limit=0.002,
     force_limit=0.5,
     shear_limit=0.2,
+    tactile="rgb",
 ):
+    if tactile not in MODES:
+        raise ValueError("Unsupported tactile display mode")
     source = Path(source)
     if frame_stride < 1 or max_frames is not None and max_frames < 1:
         raise ValueError("frame stride and max frames must be positive")
@@ -238,13 +265,16 @@ img{width:100%;max-width:1400px}input{width:65%}pre{white-space:pre-wrap}</style
 TacSL optical delta is a signed camera-depth proxy, not FEM deformation.</p>
 <button id="play">Play</button><input id="slider" type="range" min="0" value="0">
 <select id="mode"><option>rgb</option><option>optical_depth_delta</option>
-<option>normal_force</option><option>shear_force</option></select><span id="counter"></span>
+<option value="normal_force">official taxel Z</option><option value="shear_force">official taxel XY shear</option>
+<option value="pad_normal">pad outward -Y (compression negative)</option>
+<option value="pad_shear">pad body XZ shear</option></select><span id="counter"></span>
 <p><img id="picture"></p><details><summary>Per-frame calibration and provenance</summary>
 <pre id="details"></pre></details><script>const frames=[\n""")
             for position, index in enumerate(indices):
                 frame = reader.read_frame(index)
                 picture = mosaic(
                     frame,
+                    mode=tactile,
                     depth_range=(depth_min, depth_max),
                     delta_limit=delta_limit,
                     force_limit=force_limit,
@@ -265,7 +295,7 @@ TacSL optical delta is a signed camera-depth proxy, not FEM deformation.</p>
                 for mode_index, mode in enumerate(MODES):
                     view = (
                         picture
-                        if mode == "rgb"
+                        if mode == tactile
                         else mosaic(
                             frame,
                             mode=mode,
@@ -295,10 +325,16 @@ TacSL optical delta is a signed camera-depth proxy, not FEM deformation.</p>
                 }
                 # Escape HTML parser termination in metadata strings, including untrusted asset names.
                 document.write('},"details":' + json.dumps(json_value(details)).replace("<", "\\u003c") + "}")
-            document.write("];const selectedPreviewIndex=" + str(indices.index(selected["index"])) + ";\n")
+            document.write(
+                "];const selectedPreviewIndex="
+                + str(indices.index(selected["index"]))
+                + ";const initialTactileMode="
+                + json.dumps(tactile)
+                + ";\n"
+            )
             document.write("""
 const slider=document.getElementById('slider'),mode=document.getElementById('mode');
-slider.max=frames.length-1;slider.value=selectedPreviewIndex;
+slider.max=frames.length-1;slider.value=selectedPreviewIndex;mode.value=initialTactileMode;
 function show(){const i=Number(slider.value);document.getElementById('picture').src=frames[i].views[mode.value];
 document.getElementById('counter').textContent=(i+1)+' / '+frames.length;
 document.getElementById('details').textContent=JSON.stringify(frames[i].details,null,2)}
@@ -317,6 +353,7 @@ else{timer=setInterval(()=>{slider.value=(Number(slider.value)+1)%frames.length;
             "depth_range_m": [depth_min, depth_max],
             "optical_delta_range_m": [-delta_limit, delta_limit],
             "display_only": True,
+            "tactile_display_mode": tactile,
             "recording_status": reader.metadata.get("status", "legacy_complete"),
         }
         if isinstance(reader, HDF5Reader):
@@ -343,4 +380,5 @@ if __name__ == "__main__":
     parser.add_argument("--delta-limit", type=float, default=0.002)
     parser.add_argument("--force-limit", type=float, default=0.5)
     parser.add_argument("--shear-limit", type=float, default=0.2)
+    parser.add_argument("--tactile", choices=MODES, default="rgb")
     print(json.dumps(visualize(**vars(parser.parse_args())), indent=2))

@@ -225,7 +225,7 @@ def test_idle_frame_cannot_replace_a_stronger_recorded_contact_preview(tmp_path)
                 "physics_frame": 1,
                 "timestamp_ns": 40_000_000,
                 "score": 0.0,
-                "score_semantics": "maximum absolute measured normal force (N)",
+                "score_semantics": "maximum absolute official TacSL taxel Z estimate (N)",
             },
         },
     )

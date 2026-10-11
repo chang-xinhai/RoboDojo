@@ -1,7 +1,7 @@
 """Exercise collector process status with a cleanup API that uses os._exit.
 
 All sensor/task modules are deterministic CPU fixtures; this is not runtime
-capture evidence. The actual collector, NPZ writer and shutdown code run.
+capture evidence. The actual collector, HDF5 writer and shutdown code run.
 """
 
 import json
@@ -57,6 +57,15 @@ class Env:
     env_seed_list = [3]
     def __init__(self, cfg, app, **kwargs):
         assert cfg.tactile["enabled"], "TacSL config was not passed to environment"
+        if mode.startswith("contact_"):
+            assert cfg.tactile.compliance_stiffness == 100.0
+            assert list(cfg.tactile.array_size) == [20, 25]
+            assert cfg.sim.particle_readback is True
+            assert cfg.sim.host_readback_reason == "kinematic_contact_calibration"
+        else:
+            assert cfg.tactile.get("compliance_stiffness", 1500.) == 1500.
+        self.contact_fixtures = SimpleNamespace(config=contact_config if mode.startswith("contact_") else None)
+        self.tactile_manager = SimpleNamespace()
         assert cfg.saved_layouts[0]["Rigid"]["test_object"], "Layout must exist before task construction"
         assert list(cfg.sim.seed) == [3] and kwargs["seed"] == 3
         assert cfg.eval_cfg.seed == 2 and cfg.eval_cfg.episode_seed == 3
@@ -137,10 +146,37 @@ def enable_extensions():
         raise RuntimeError("deliberate legacy extension initialization failure")
 
 compat.enable_legacy_isaacsim_extensions = enable_extensions
+if mode.startswith("contact_"):
+    import utils.contact_demo as contact_module
+    contact_config = contact_module.ContactDemoConfig()
+    class ContactController:
+        def __init__(self, fixtures, manager, sim):
+            self.sim = sim
+            self.config = contact_config
+            self.phases = set()
+        def configuration(self):
+            return {"enabled": True, "synthetic_cpu_fixture": True}
+        def apply(self, elapsed, frame):
+            self.command = {**contact_module.phase_command(self.config, elapsed),
+                            "issued_before_physics_frame": frame}
+        def sample(self):
+            assert self.sim.frame > self.command["issued_before_physics_frame"]
+            self.phases.add(self.command["phase"])
+            return {"physics_frame": self.sim.frame + (1 if mode == "contact_clock_failure" else 0),
+                    "timestamp_ns": round(self.sim.frame * self.sim.get_physics_dt() * 1e9),
+                    "last_command": dict(self.command)}
+        def validate(self):
+            assert self.phases == set(contact_module.PHASES), self.phases
+            return {"phases_observed": sorted(self.phases), "synthetic_cpu_fixture": True}
+        def close(self): pass
+    contact_module.ContactMotionDemo = ContactController
 layout_file = Path(output) / "test-layout.json"
 layout_file.write_text('{"Rigid":{"test_object":[{}]}}')
 sys.argv = ["collect_multimodal.py", "--task", "make_kong", "--frames", "1", "--warmup-steps", "0", "--output", output,
             "--layout-file", str(layout_file), "--layout-id", "3", "--eval-seed", "2"]
+if mode.startswith("contact_"):
+    sys.argv[sys.argv.index("--frames") + 1] = "2" if mode == "contact_short" else "100"
+    sys.argv.append("--contact-demo")
 if mode == "visualization_failure":
     sys.argv.append("--visualize")
 runpy.run_path("reproduction/collect_multimodal.py", run_name="__main__")
@@ -168,6 +204,8 @@ class CollectorExitTests(unittest.TestCase):
             self.assertTrue(validation["scene"]["saved_poses_applied"])
             self.assertTrue(validation["scene"]["placement_verified"])
             self.assertEqual(validation["scene_final"]["physics_frame"], validation["frames"][-1]["physics_frame"])
+            self.assertTrue(Path(validation["frames"][0]["file"]).exists())
+            self.assertTrue(validation["frames"][0]["file"].endswith("episode.hdf5"))
             self.assertLess(validation["scene_initial"]["physics_frame"], validation["scene_final"]["physics_frame"])
             self.assertEqual(validation["scene"]["live_placements"]["/World/test"]["world_center"], [0.1, 0.2, 0.8])
             manifest = json.loads((Path(directory) / "manifest.json").read_text())
@@ -177,6 +215,40 @@ class CollectorExitTests(unittest.TestCase):
             self.assertEqual((profile["eval_seed"], profile["episode_seed"]), (2, 3))
             lifecycle = json.loads((Path(directory) / "fixture-lifecycle.json").read_text())
             self.assertEqual(lifecycle, [["reset", 3, 2], ["place", [0]], ["origin"], ["history"]])
+
+    def test_contact_profile_and_all_phases_are_saved_with_matching_clocks(self):
+        from utils.multimodal_hdf5 import HDF5Reader
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_collector("contact_success", directory)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with HDF5Reader(Path(directory) / "episode.hdf5") as reader:
+                self.assertEqual(len(reader), 100)
+                self.assertEqual(
+                    reader.metadata["run"]["resolved_configuration"]["tactile"]["compliance_stiffness"], 100.0
+                )
+                for index in range(len(reader)):
+                    frame = reader.read_frame(index)
+                    self.assertEqual(frame["action"]["contact_demo"]["physics_frame"], frame["sync"]["physics_frame"])
+                self.assertEqual(len(reader.metadata["validation"]["contact_demo"]["phases_observed"]), 10)
+
+    def test_contact_insufficient_duration_rejected_before_recording(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_collector("contact_short", directory)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("requires at least 100 frames", result.stderr)
+            self.assertFalse((Path(directory) / "episode.hdf5").exists())
+
+    def test_contact_sensor_clock_mismatch_marks_failed_partial(self):
+        from utils.multimodal_hdf5 import HDF5Reader
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_collector("contact_clock_failure", directory)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("same physics clock", result.stderr)
+            with HDF5Reader(Path(directory) / "episode.hdf5.partial") as reader:
+                self.assertEqual(reader.metadata["status"], "failed")
+            self.assertFalse((Path(directory) / "manifest.json").exists())
 
     def test_missing_task_objects_never_produce_successful_recording(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -214,7 +286,12 @@ class CollectorExitTests(unittest.TestCase):
             result = self.run_collector("escaped_mid_record", directory)
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn("offscreen/unplaced", result.stderr)
-            self.assertTrue((Path(directory) / "frame_000000.npz").exists())
+            from utils.multimodal_hdf5 import HDF5Reader
+
+            with HDF5Reader(Path(directory) / "episode.hdf5.partial") as reader:
+                self.assertEqual(len(reader), 1)
+                self.assertEqual(reader.metadata["status"], "failed")
+            self.assertFalse((Path(directory) / "episode.hdf5").exists())
             self.assertFalse((Path(directory) / "manifest.json").exists())
             self.assertFalse((Path(directory) / "validation.json").exists())
 

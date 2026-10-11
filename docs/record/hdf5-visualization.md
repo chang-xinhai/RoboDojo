@@ -15,6 +15,8 @@ bash reproduction/isaac61/run.sh visualize \
 
 显示不会修改原始数据：IR 使用原始 uint8 亮度；GT 和 SL 使用固定的米制色标，分别属于 RGB 和左 IR 光学坐标系，紫色表示无效深度。触觉 `optical_depth_delta` 是无接触基线光学深度减去当前 RTX 光学深度的有符号米制差；保留负值，是光学几何代理，并非 FEM 胶体形变。法向和切向数据是官方 TacSL 惩罚模型估计，逐采样点和不等于校准后的合力。力场不可用时保留 `None` 及原因。
 
+`--tactile pad_normal` 显示胶面外法向 −Y 的有符号力估计（压入为负），`--tactile pad_shear` 显示胶体 XZ 切向力大小；HTML 也可切换。原 `normal_force` 是官方 taxel 局部 Z 分量，原 `shear_force` 是官方局部 XY 分量，二者保持原样，不能直接等同于胶面受压力。新增 `force_body_xyz`、`pad_normal_force`、`pad_shear_force_xz` 由记录的真实 taxel 世界旋转和胶体世界旋转转换得到，原始 XYZW 姿态一并保存并独立重算验证。采样热图遵循官方 x 外层、z 内层排列，显示为 z 行、x 列，不改原数组。
+
 使用 `--delta-limit`、`--force-limit`、`--shear-limit` 设置整段视频一致的显示量程。使用 `--max-frames` 和 `--frame-stride` 控制 HTML 大小。导出时只读一个原始帧并逐个写入预览；独立 HTML 包含所选预览，浏览器会加载这些预览，较长录像应限制导出帧数。HDF5 本身保持全部帧。
 
 ## 文件协议与失败行为

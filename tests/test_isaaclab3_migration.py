@@ -162,6 +162,7 @@ def test_particle_pipeline_selector_preserves_cuda_manager(requires_readback, mo
     )
     instance = cls.__new__(cls)
     instance._requires_particle_readback = requires_readback
+    instance.config = {}
     context = SimpleNamespace(physics_manager=physics_manager, set_setting=settings.__setitem__)
     instance.setup_physics(SimpleNamespace(sim=context))
     assert readback_managers == ([physics_manager] if requires_readback else [])

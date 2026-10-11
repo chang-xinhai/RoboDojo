@@ -8,6 +8,20 @@ remain the official implementation.
 from utils.isaaclab_compat import as_torch
 
 
+def cleanup_camera_once(camera, cleanup):
+    """Release native render resources once, including TacSL's explicit destructor.
+
+    Official TacSL calls its camera destructor explicitly and Python later calls
+    it again. The pinned RTX renderer clears the render product after cleanup,
+    so invoking it twice raises. Successful cleanup is remembered; failures are
+    neither swallowed nor marked complete.
+    """
+    if getattr(camera, "_robodojo_camera_cleanup_complete", False):
+        return
+    cleanup()
+    camera._robodojo_camera_cleanup_complete = True
+
+
 def tactile_camera_depth(output):
     """Resolve either the EA canonical key or the legacy depth key explicitly."""
     for key in ("depth/distance_to_image_plane", "distance_to_image_plane", "depth"):

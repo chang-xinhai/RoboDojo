@@ -91,6 +91,7 @@ class TaskEnv(BaseEnv):
 
     def _post_setup_scene(self, sim):
         self.scene_manager.initialize(sim)
+        self._setup_contact_fixtures(sim)
         # TacSL mounts and SDF schemas must exist before Isaac Lab activates
         # the PhysX articulation and contact views during its first reset.
         self.tactile_manager.initialize(sim, self.scene_manager)
@@ -110,6 +111,14 @@ class TaskEnv(BaseEnv):
             "robodojo_legacy_camera_capture",
             lambda _: ensure_isaac_rtx_render_update(force=True),
         )
+
+    def _setup_contact_fixtures(self, sim):
+        """Optional calibration fixtures, authored before native contact cooking.
+
+        Demo subclasses can populate SceneManager._tactile_calibration_objects.
+        Ordinary tasks have no extra objects and retain their saved layouts.
+        """
+        pass
 
     def update_seed(self, seed: Any | None = None):
         super().update_seed(seed)

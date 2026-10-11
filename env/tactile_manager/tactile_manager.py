@@ -91,7 +91,11 @@ class TactileManager:
 
         objects = dict(scene_manager._rigid_and_dynamic_objects[env_index])
         objects.update(scene_manager._articulation_objects[env_index])
-        return self._contact_meshes([obj.prim_path for obj in objects.values()])
+        roots = [obj.prim_path for obj in objects.values()]
+        calibration_objects = getattr(scene_manager, "_tactile_calibration_objects", None)
+        if calibration_objects is not None:
+            roots.extend(obj.prim_path for obj in calibration_objects[env_index].values())
+        return self._contact_meshes(roots)
 
     def _contact_meshes(self, roots):
         from pxr import Usd, UsdGeom, UsdPhysics
@@ -323,8 +327,11 @@ class TactileManager:
         if not self.enabled:
             return {}
         import torch
+        import warp as wp
 
-        from utils.isaaclab_compat import simulation_snapshot
+        from utils.isaaclab_compat import as_torch, simulation_snapshot
+
+        from .force_projection import project_force_to_pad
 
         self.synchronize_contact_objects()
         context = self.sim.sim
@@ -339,8 +346,10 @@ class TactileManager:
                 for env_index in range(self.num_envs):
                     sensors = environments[env_index]
                     primary = sensors[0].data
+                    baseline_depth = as_torch(sensors[0]._nominal_tactile["distance_to_image_plane"])[0]
                     available = bool(self.contact_paths_by_env[env_index])
                     normal = shear = penetration = points = None
+                    body_force = pad_normal = pad_shear = taxel_quat = gel_pose = None
                     if available:
                         normal = primary.tactile_normal_force[0].clone()
                         shear = primary.tactile_shear_force[0].clone()
@@ -350,14 +359,25 @@ class TactileManager:
                             normal += sensor.data.tactile_normal_force[0]
                             shear += sensor.data.tactile_shear_force[0]
                             penetration = penetration.maximum(sensor.data.penetration_depth[0])
+                        taxel_quat = primary.tactile_points_quat_w[0].clone()
+                        gel_pose = wp.to_torch(sensors[0]._elastomer_body_view.get_transforms())[0].clone()
+                        body_force, pad_normal, pad_shear = project_force_to_pad(
+                            normal, shear, taxel_quat, gel_pose[3:]
+                        )
                     samples.append(
                         {
                             "rgb": primary.tactile_rgb_image[0].to(torch.uint8).clone(),
                             "depth": primary.tactile_depth_image[0].clone(),
+                            "optical_depth_delta": (baseline_depth - primary.tactile_depth_image[0]).clone(),
                             "normal_force": normal,
                             "shear_force": shear,
                             "penetration_depth": penetration,
                             "points_pos_w": points,
+                            "force_body_xyz": body_force,
+                            "pad_normal_force": pad_normal,
+                            "pad_shear_force_xz": pad_shear,
+                            "taxel_orientation_w_xyzw": taxel_quat,
+                            "gel_pose_w_xyzw": gel_pose,
                             "provenance": {
                                 "backend": "isaaclab_tacsl",
                                 "model": "official_TacSL_penalty_and_Taxim",
@@ -377,14 +397,48 @@ class TactileManager:
                                 "depth_semantics": "distance_to_image_plane",
                                 "penetration_units": "m",
                                 "force_units": "N",
+                                "force_frame": "official_tacsl_taxel_local",
+                                "normal_force_axis": "official_taxel_z",
+                                "shear_components": ["x", "y"],
+                                "points_pos_w_units": "m",
+                                "points_pos_w_frame": "world",
+                                "pad_normal_force_frame": "actual_R1.5_elastomer_body",
+                                "force_body_xyz_units": "N",
+                                "pad_normal_force_units": "N",
+                                "pad_shear_force_xz_units": "N",
+                                "force_projection": "actual XYZW taxel-world rotation followed by inverse actual gel-body-world rotation",
+                                "pad_normal_force_axis": [0.0, -1.0, 0.0],
+                                "pad_normal_force_sign": "signed outward: dot(F_body,[0,-1,0]); compression is negative",
+                                "pad_shear_force_xz_components": ["body_x", "body_z"],
+                                "optical_depth_delta_units": "m",
+                                "optical_depth_delta_semantics": "no_contact_camera_depth_minus_current_camera_depth",
+                                "optical_depth_delta_limit": "RTX depth proxy of visible gel/contact geometry; not FEM gel deformation",
+                                "compliant_contact_stiffness": float(self.config.get("compliance_stiffness", 1500.0)),
+                                "compliant_contact_damping": float(self.config.get("compliance_damping", 5.0)),
+                                "penalty_normal_stiffness": float(self.config.get("normal_stiffness", 1500.0)),
                                 "env_id": env_index,
                                 "array_size": list(self.config.get("array_size", (12, 16))),
+                                "taxel_array_axes": ["sensor_local_x", "sensor_local_z"],
+                                "taxel_flatten_order": "C: x outer, z inner",
                                 "contact_object_paths": list(self.contact_paths_by_env[env_index]),
                             },
                         }
                     )
                 result = {"timestamp_ns": timestamp_ns, "physics_frame": frame}
-                for field in ("rgb", "depth", "normal_force", "shear_force", "penetration_depth", "points_pos_w"):
+                for field in (
+                    "rgb",
+                    "depth",
+                    "optical_depth_delta",
+                    "normal_force",
+                    "shear_force",
+                    "penetration_depth",
+                    "points_pos_w",
+                    "force_body_xyz",
+                    "pad_normal_force",
+                    "pad_shear_force_xz",
+                    "taxel_orientation_w_xyzw",
+                    "gel_pose_w_xyzw",
+                ):
                     values = [sample[field] for sample in samples]
                     result[field] = (
                         torch.stack(values)

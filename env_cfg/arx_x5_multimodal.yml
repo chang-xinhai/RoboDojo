@@ -19,6 +19,6 @@ observation:
 
 tactile:
   enabled: true
-  array_size: [12, 16]
+  array_size: [20, 25]
   margin: 0.003
   normal_stiffness: 1500.0

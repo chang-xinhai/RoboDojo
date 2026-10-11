@@ -14,6 +14,8 @@ SETTINGS = (
     "/rtx-transient/resourcemanager/enableTextureStreaming",
     "/physics/fabricUseGPUInterop",
     "/isaaclab/robodojo/surface_fabric_cpu_copy",
+    "/isaaclab/robodojo/particle_readback",
+    "/isaaclab/robodojo/contact_calibration_readback",
     "/physics/fabricUpdateTransformations",
     "/physics/fabricEnableCloth",
     "/physics/fabricEnableClothVisualization",

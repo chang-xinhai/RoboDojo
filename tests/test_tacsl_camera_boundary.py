@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from env.tactile_manager.camera_boundary import TacSLCameraBoundary, tactile_camera_depth
+from env.tactile_manager.camera_boundary import TacSLCameraBoundary, cleanup_camera_once, tactile_camera_depth
 
 
 def runtime_arrays():
@@ -22,6 +22,22 @@ def runtime_arrays():
     tensor = torch.full((1, 4, 3, 1), 0.0186, dtype=torch.float32)
     proxy = module.ProxyArray(wp.from_torch(tensor))
     return torch, tensor, proxy
+
+
+def test_native_camera_cleanup_is_idempotent_and_does_not_hide_failure():
+    camera = SimpleNamespace()
+    releases = []
+    cleanup_camera_once(camera, lambda: releases.append("native render product destroyed"))
+    cleanup_camera_once(camera, lambda: pytest.fail("second native cleanup must not run"))
+    assert releases == ["native render product destroyed"]
+    failed_camera = SimpleNamespace()
+
+    def fail():
+        raise RuntimeError("actual native cleanup failed")
+
+    with pytest.raises(RuntimeError, match="native cleanup failed"):
+        cleanup_camera_once(failed_camera, fail)
+    assert not getattr(failed_camera, "_robodojo_camera_cleanup_complete", False)
 
 
 @pytest.mark.parametrize("key", ["depth/distance_to_image_plane", "distance_to_image_plane", "depth"])

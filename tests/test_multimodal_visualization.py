@@ -8,7 +8,7 @@ import unittest
 import numpy as np
 
 from reproduction.convert_multimodal_hdf5 import convert
-from reproduction.visualize_multimodal import letterbox, metric_color, visualize
+from reproduction.visualize_multimodal import _taxels, letterbox, metric_color, visualize
 from tests.test_multimodal import fixture
 from utils.multimodal import MultimodalWriter
 from utils.multimodal_hdf5 import HDF5Reader, HDF5Writer
@@ -22,6 +22,15 @@ class VisualizationTests(unittest.TestCase):
         self.assertEqual(white.sum(), 120 * 160)
         self.assertEqual(white[:, :80].sum(), 0)
         self.assertTrue(white[:, 80:200].all())
+
+    def test_declared_official_taxel_axes_display_z_rows_and_x_columns(self):
+        data = {
+            "normal_force": np.arange(6, dtype=np.float32),
+            "metadata": {"array_size": [2, 3], "taxel_array_axes": ["sensor_local_x", "sensor_local_z"]},
+        }
+        np.testing.assert_equal(_taxels(data, "normal_force"), [[0, 3], [1, 4], [2, 5]])
+        del data["metadata"]["taxel_array_axes"]
+        np.testing.assert_equal(_taxels(data, "normal_force"), [[0, 1, 2], [3, 4, 5]])
 
     def test_metric_scale_fixed_and_invalid_distinct(self):
         a = metric_color(np.array([[1.0, 1.5], [np.nan, 2.0]]), 0.1, 2.5)

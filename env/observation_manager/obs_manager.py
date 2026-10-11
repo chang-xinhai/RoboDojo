@@ -274,6 +274,12 @@ class ObsManager:
                             "shear_force",
                             "penetration_depth",
                             "points_pos_w",
+                            "optical_depth_delta",
+                            "force_body_xyz",
+                            "pad_normal_force",
+                            "pad_shear_force_xz",
+                            "taxel_orientation_w_xyzw",
+                            "gel_pose_w_xyzw",
                             "provenance",
                             "metadata",
                         }:

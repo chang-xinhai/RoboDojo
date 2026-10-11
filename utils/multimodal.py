@@ -36,6 +36,52 @@ def json_value(value):
     return value
 
 
+def _validate_pad_projection(data, image_only, label):
+    """Check optional native pose-derived force coordinates without changing them."""
+    fields = ("force_body_xyz", "pad_normal_force", "pad_shear_force_xz", "taxel_orientation_w_xyzw", "gel_pose_w_xyzw")
+    if not any(field in data for field in fields):
+        return
+    if any(field not in data for field in fields):
+        raise ValueError(f"{label}: incomplete pad force projection fields")
+    if image_only:
+        if any(data[field] is not None for field in fields):
+            raise ValueError(f"{label}: unavailable pad force projection must be null")
+        return
+    count = np.asarray(data["normal_force"]).size
+    shapes = ((count, 3), (count,), (count, 2), (count, 4), (7,))
+    arrays = []
+    for field, shape in zip(fields, shapes, strict=True):
+        value = np.asarray(data[field])
+        if value.shape != shape or value.dtype.kind != "f" or not np.isfinite(value).all():
+            raise ValueError(f"{label}: invalid shape or finite values for {field}")
+        arrays.append(value)
+    body, normal, shear, taxel, pose = arrays
+    for quaternion in (taxel, pose[3:]):
+        if not np.allclose(np.linalg.norm(quaternion, axis=-1), 1, atol=1e-3, rtol=0):
+            raise ValueError(f"{label}: force projection quaternion must have unit norm")
+    original_shear = np.asarray(data["shear_force"])
+    if original_shear.shape != (count, 2):
+        raise ValueError(f"{label}: pad projection requires official XY shear")
+    original = np.column_stack((original_shear, data["normal_force"]))
+
+    def rotate(quaternion, vector):
+        q = np.asarray(quaternion, dtype=np.float64)
+        q = q / np.linalg.norm(q, axis=-1, keepdims=True)
+        v = np.asarray(vector, dtype=np.float64)
+        first = np.cross(q[..., :3], v)
+        return v + 2 * (q[..., 3:] * first + np.cross(q[..., :3], first))
+
+    inverse_gel = pose[3:].copy()
+    inverse_gel[:3] *= -1
+    expected = rotate(inverse_gel, rotate(taxel, original))
+    if (
+        not np.allclose(body, expected, atol=1e-5, rtol=1e-4)
+        or not np.allclose(normal, -body[:, 1], atol=1e-5, rtol=1e-4)
+        or not np.allclose(shear, body[:, [0, 2]], atol=1e-5, rtol=1e-4)
+    ):
+        raise ValueError(f"{label}: pad force projection disagrees with actual orientations and original forces")
+
+
 def validate_multimodal(observation, *, tactile_component=False):
     """Reject missing sensors, stale clocks and ambiguous depth before writing."""
     sync = observation.get("sync", {})
@@ -155,6 +201,7 @@ def validate_multimodal(observation, *, tactile_component=False):
                     or penetration.shape[0] != force.shape[0]
                 ):
                     raise ValueError(f"{side}.{finger}: tactile force samples do not match taxel positions")
+            _validate_pad_projection(data, image_only, f"{side}.{finger}")
             if "physics_frame" in data and (isinstance(data["physics_frame"], bool) or data["physics_frame"] != frame):
                 raise ValueError(f"{side}.{finger}: tactile physics frame mismatch")
             if data.get("timestamp_ns") != stamp:

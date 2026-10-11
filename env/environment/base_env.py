@@ -239,7 +239,10 @@ class BaseEnv(gym.Env):
             from utils.particle_readback_bridge import install_particle_readback_bridge
 
             self._particle_readback_handle = install_particle_readback_bridge(sim.sim.physics_manager)
-            print("[RoboDojo] PBD fluid pipeline: GPU dynamics with particle readback enabled.")
+            if self.config.get("host_readback_reason") == "kinematic_contact_calibration":
+                print("[RoboDojo] Contact calibration: GPU dynamics with native host readback for kinematic targets.")
+            else:
+                print("[RoboDojo] PBD fluid pipeline: GPU dynamics with particle readback enabled.")
 
     def close(self):
         try:

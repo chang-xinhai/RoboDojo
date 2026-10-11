@@ -44,6 +44,37 @@ def test_every_mesh_of_articulated_and_rigid_objects_is_collected():
         manager.synchronize_contact_objects()
 
 
+def test_calibration_fixture_collection_preserves_task_objects_and_environment_isolation():
+    pytest.importorskip("pxr")
+    from pxr import Usd, UsdGeom, UsdPhysics
+
+    stage = Usd.Stage.CreateInMemory()
+    task = []
+    fixtures = []
+    for index in range(2):
+        prefix = f"/World/envs/env_{index}"
+        for suffix in ("task_object", "calibration_probe"):
+            body = UsdGeom.Xform.Define(stage, prefix + "/" + suffix)
+            UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
+            collision = UsdGeom.Mesh.Define(stage, str(body.GetPath()) + "/collision")
+            UsdPhysics.CollisionAPI.Apply(collision.GetPrim())
+        # Same dictionary label must not let calibration erase a task object.
+        task.append({"object": SimpleNamespace(prim_path=prefix + "/task_object")})
+        fixtures.append({"object": SimpleNamespace(prim_path=prefix + "/calibration_probe")})
+    manager = TactileManager(2, {"enabled": True}, None, "cuda:0")
+    manager.stage = stage
+    objects = SimpleNamespace(
+        _rigid_and_dynamic_objects=task,
+        _articulation_objects=[{}, {}],
+        _tactile_calibration_objects=fixtures,
+    )
+    for index in range(2):
+        assert set(manager._discover_contact_bodies(objects, index)) == {
+            f"/World/envs/env_{index}/{name}/collision" for name in ("task_object", "calibration_probe")
+        }
+    assert all(len(group) == 1 for group in task)
+
+
 def test_disabled_collision_mesh_is_excluded_without_losing_enabled_link_siblings():
     pytest.importorskip("pxr")
     from pxr import Usd, UsdGeom, UsdPhysics

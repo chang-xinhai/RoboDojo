@@ -20,7 +20,7 @@ from pxr import UsdGeom
 import torch
 import warp as wp
 
-from .camera_boundary import TacSLCameraBoundary
+from .camera_boundary import TacSLCameraBoundary, cleanup_camera_once
 from .sdf_boundary import BodyFrameSdfView, shape_pose_in_body
 from .triangle_mesh_sdf import WarpTriangleMeshSdfView
 
@@ -62,6 +62,9 @@ class SingleEnvironmentSensorBase(SensorBase):
 
 class SingleEnvironmentCamera(Camera, SingleEnvironmentSensorBase):
     """Official Camera/RTX renderer with one-instance parent/buffer allocation."""
+
+    def __del__(self):
+        cleanup_camera_once(self, super().__del__)
 
     def _initialize_impl(self):
         # Mirrors the pinned official Camera initialize. Sensor/view/buffers
