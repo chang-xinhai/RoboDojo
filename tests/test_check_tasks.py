@@ -38,6 +38,26 @@ def evidence():
         "physics_steps": 10,
         "packages": {"isaacsim": "6.1.0.0", "isaaclab": "3.0.0"},
         "isaaclab_source_commit": "ea_pin",
+        "task_runtime": {
+            "instruction": {"env_id": 0, "templates": ["Stack the three bowls."]},
+            "reward": {
+                "registered": True,
+                "executed": True,
+                "step_executed": True,
+                "harness_success_is_episode_validity": True,
+                "parser_state_restored_between_extra_calls": True,
+                "predicate_evaluation_mode": "isolated_extra_calls_before_normal_reward_step",
+                "reward_values": [0.0],
+                "score_values": [0.0],
+                "predicate_count": 2,
+                "predicate_evaluations": [
+                    {"env_id": 0, "name": "object_upright", "value": 1.0},
+                    {"env_id": 0, "name": "object_stacked", "value": 0.0},
+                ],
+            },
+            "physics_step_before": 10,
+            "physics_step_after": 10,
+        },
         "layout": {
             "task": "stack_bowls",
             "file": str(FIXTURE_LAYOUT),
@@ -102,6 +122,100 @@ class AcceptanceTests(unittest.TestCase):
         for camera in sample["camera_shapes"].values():
             camera["color"] = camera.pop("rgb")
         self.assertIs(runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd"), sample)
+
+    def test_task_api_evidence_accepts_unsuccessful_policy_and_finite_negative_reward(self):
+        sample = evidence()
+        reward = sample["task_runtime"]["reward"]
+        reward["reward_values"] = [-0.25]
+        reward["predicate_evaluations"][0]["value"] = -0.5
+        self.assertIs(runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd"), sample)
+        self.assertFalse(sample["policy_evaluation"])
+
+    def test_old_scene_smoke_cannot_resume_without_task_api_execution(self):
+        sample = evidence()
+        del sample["task_runtime"]
+        with self.assertRaisesRegex(ValueError, "instruction generation"):
+            runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd")
+        record = {
+            "status": "passed",
+            "context": context(),
+            "process_exit_code": 0,
+            "real_runtime": True,
+            "evidence": sample,
+        }
+        self.assertFalse(runner.can_resume(record, context(), "stack_bowls", "arx_x5_rgbd"))
+
+    def test_empty_invalid_or_wrong_environment_instructions_are_rejected(self):
+        for field, value in (
+            ("env_id", 1),
+            ("env_id", False),
+            ("templates", []),
+            ("templates", "Stack the bowls."),
+            ("templates", [" "]),
+            ("templates", ["Stack the bowls.", None]),
+        ):
+            sample = evidence()
+            sample["task_runtime"]["instruction"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, "instruction"):
+                runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd")
+
+    def test_registered_rewards_without_real_step_and_finite_results_are_rejected(self):
+        for field, value in (
+            ("executed", False),
+            ("registered", False),
+            ("step_executed", False),
+            ("step_executed", 1),
+            ("reward_values", []),
+            ("reward_values", [0, 1]),
+            ("reward_values", [float("nan")]),
+            ("score_values", [float("inf")]),
+            ("score_values", [True]),
+        ):
+            sample = evidence()
+            sample["task_runtime"]["reward"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd")
+
+    def test_reward_probe_preserves_frozen_physics_and_states_its_validity_scope(self):
+        for field, value in (
+            ("physics_step_before", None),
+            ("physics_step_before", -1),
+            ("physics_step_before", False),
+            ("physics_step_before", 10.0),
+            ("physics_step_after", float("nan")),
+            ("physics_step_after", 11),
+        ):
+            sample = evidence()
+            sample["task_runtime"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, "frozen physics"):
+                runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd")
+        for field, value in (
+            ("harness_success_is_episode_validity", False),
+            ("parser_state_restored_between_extra_calls", False),
+            ("predicate_evaluation_mode", "policy_success"),
+        ):
+            sample = evidence()
+            sample["task_runtime"]["reward"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, "episode validity"):
+                runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd")
+
+    def test_short_circuited_unidentified_and_nonfinite_predicate_results_are_rejected(self):
+        for field, value in (
+            ("predicate_count", 0),
+            ("predicate_count", True),
+            ("predicate_count", 3),
+            ("predicate_evaluations", []),
+            ("predicate_evaluations", [{"env_id": 0, "name": "check", "value": 0}]),
+        ):
+            sample = evidence()
+            sample["task_runtime"]["reward"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, "predicate"):
+                runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd")
+        for field, value in (("env_id", 1), ("env_id", False), ("name", ""), ("value", True), ("value", float("nan"))):
+            sample = evidence()
+            sample["task_runtime"]["reward"]["predicate_evaluations"][0][field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, "predicate"):
+                runner.check_evidence(sample, "stack_bowls", "arx_x5_rgbd")
 
     def test_missing_actual_runtime_and_unstepped_scene_are_rejected(self):
         for field, value in (("real_runtime", False), ("physics_steps", 0), ("isaaclab_source_commit", None)):

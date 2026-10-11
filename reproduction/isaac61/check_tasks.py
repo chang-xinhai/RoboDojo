@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Run fresh Isaac Sim 6.1 processes for every task's scene/reset/step/RGBD smoke.
+"""Run fresh Isaac Sim 6.1 processes for each task's scene and runtime APIs.
 
 Sequential execution avoids competing Kit processes on one GPU. Reports are
 accepted only with zero process exit plus a fresh smoke JSON containing all three
-RGBD cameras. Resume requires the same commit, source contents, runtime packages,
+RGBD cameras, generated instructions and executed reward predicates. Resume
+requires the same commit, source contents, runtime packages,
 Lab source pin and configuration. This does not evaluate a robot policy or prove
 TacSL / structured-light operation (their collectors have separate acceptance).
 """
@@ -23,9 +24,15 @@ import subprocess
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
-SCHEMA = "robodojo.task-scene-smoke.v3"
+SCHEMA = "robodojo.task-scene-smoke.v4"
 CAMERAS = {"head", "left_wrist", "right_wrist"}
-REQUIRED_CHECKS = {"task scene initialization", "robot reset", "RGBD observation capture"}
+REQUIRED_CHECKS = {
+    "task scene initialization",
+    "robot reset",
+    "RGBD observation capture",
+    "task instruction generation",
+    "task reward evaluation",
+}
 OBJECT_STORAGES = {
     "Rigid": "rigid_and_dynamic_objects",
     "Dynamic": "rigid_and_dynamic_objects",
@@ -243,6 +250,64 @@ def check_scene_evidence(evidence, task):
     check_placement_evidence(scene, source_layout, wrappers)
 
 
+def check_task_runtime(evidence):
+    """Require task API execution without requiring a successful robot policy."""
+    runtime = evidence.get("task_runtime", {})
+    instruction = runtime.get("instruction", {})
+    templates = instruction.get("templates")
+    if (
+        instruction.get("env_id") != 0
+        or isinstance(instruction.get("env_id"), bool)
+        or not isinstance(templates, list)
+        or not templates
+        or any(not isinstance(template, str) or not template.strip() for template in templates)
+    ):
+        raise ValueError("Missing actual task instruction generation for environment zero")
+    reward = runtime.get("reward", {})
+    if any(reward.get(flag) is not True for flag in ("executed", "registered", "step_executed")):
+        raise ValueError("Task rewards must be registered and actually executed through a reward step")
+    if (
+        reward.get("harness_success_is_episode_validity") is not True
+        or reward.get("parser_state_restored_between_extra_calls") is not True
+        or reward.get("predicate_evaluation_mode") != "isolated_extra_calls_before_normal_reward_step"
+    ):
+        raise ValueError("Task reward diagnostics must preserve parser state and distinguish episode validity")
+    before, after = runtime.get("physics_step_before"), runtime.get("physics_step_after")
+    if (
+        any(not isinstance(step, int) or isinstance(step, bool) or step < 0 for step in (before, after))
+        or before != after
+    ):
+        raise ValueError("Task API evaluation requires the same frozen physics step before and after")
+
+    def finite_number(value):
+        return isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value)
+
+    for field in ("reward_values", "score_values"):
+        values = reward.get(field)
+        if not isinstance(values, list) or len(values) != 1 or not finite_number(values[0]):
+            raise ValueError(f"Missing finite one-environment task {field}")
+    predicates = reward.get("predicate_evaluations")
+    count = reward.get("predicate_count")
+    if (
+        not isinstance(count, int)
+        or isinstance(count, bool)
+        or count < 1
+        or not isinstance(predicates, list)
+        or len(predicates) != count
+    ):
+        raise ValueError("Every registered task predicate requires actual evaluation evidence")
+    for predicate in predicates:
+        if (
+            not isinstance(predicate, dict)
+            or predicate.get("env_id") != 0
+            or isinstance(predicate.get("env_id"), bool)
+            or not isinstance(predicate.get("name"), str)
+            or not predicate["name"].strip()
+            or not finite_number(predicate.get("value"))
+        ):
+            raise ValueError("Task predicate evaluation must identify its environment, name and finite result")
+
+
 def check_evidence(evidence, task, env_cfg):
     """Validate smoke output structure independently of its status string."""
     if evidence.get("status") != "passed" or evidence.get("task") != task or evidence.get("env_cfg") != env_cfg:
@@ -256,7 +321,8 @@ def check_evidence(evidence, task, env_cfg):
     if not evidence.get("isaaclab_source_commit"):
         raise ValueError("Smoke must identify the Isaac Lab source commit")
     if not REQUIRED_CHECKS.issubset(evidence.get("checks", [])):
-        raise ValueError("Missing scene/reset/RGBD acceptance checks")
+        raise ValueError("Missing scene/reset/RGBD/instruction/reward acceptance checks")
+    check_task_runtime(evidence)
     check_scene_evidence(evidence, task)
     cameras = {name.removeprefix("cam_"): shape for name, shape in evidence.get("camera_shapes", {}).items()}
     if set(cameras) != CAMERAS:
