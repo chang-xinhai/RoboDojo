@@ -117,6 +117,26 @@ def test_nonfinite_later_predicate_cannot_hide_behind_a_false_first_check():
     assert manager.check_list[0]
 
 
+def test_bound_label_callback_retains_native_owner_without_deepcopy():
+    env, manager, parser = make_task()
+
+    class NativeOwner:
+        def __deepcopy__(self, memo):
+            raise AssertionError("Native stage owners cannot be deep-copied")
+
+        def select(self, args):
+            return 0.25
+
+    owner = NativeOwner()
+    callback = owner.select
+    predicate = ("native_selector", {"label": callback})
+    parser.native_selector = lambda args: args["label"](args)
+    env.run_reward = lambda: manager.check([predicate])
+    result = validate_task_runtime(env)
+    assert result["reward"]["predicate_evaluations"] == [{"env_id": 0, "name": "native_selector", "value": 0.25}]
+    assert predicate[1]["label"] is callback
+
+
 def test_runtime_probe_requires_physics_to_stay_frozen():
     env, _, _ = make_task()
     env.advance_physics = True

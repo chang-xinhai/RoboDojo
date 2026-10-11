@@ -9,6 +9,7 @@ from time import perf_counter
 import numpy as np
 
 from utils.isaaclab_compat import simulation_snapshot
+from utils.transformer import safe_deepcopy_keep_callable
 
 REWARD_COLLECTIONS = (
     "check_list",
@@ -96,7 +97,7 @@ def validate_task_runtime(env):
         predicate_started = perf_counter()
         _trace("predicate_begin", name=predicate[0], env_id=0)
         try:
-            result = manager.call_func_parser(deepcopy(predicate), 0)
+            result = manager.call_func_parser(safe_deepcopy_keep_callable(predicate), 0)
             extra.append({"env_id": 0, "name": predicate[0], "value": finite_scalar(result, predicate[0])})
             _trace("predicate_end", name=predicate[0], elapsed_seconds=perf_counter() - predicate_started)
         finally:
