@@ -19,11 +19,13 @@ parser.add_argument("--task", default="stack_bowls")
 parser.add_argument("--env-cfg", default="arx_x5_multimodal")
 parser.add_argument("--layout-config", default="arx_x5")
 parser.add_argument("--layout-id", type=int, default=0)
+parser.add_argument("--eval-seed", type=int, default=0, help="Actual saved-layout and support-trajectory cohort.")
 parser.add_argument("--layout-file", type=Path, help="Override the canonical saved eval layout.")
 parser.add_argument("--frames", type=int, default=5)
 parser.add_argument("--warmup-steps", type=int, default=10)
 parser.add_argument("--output", type=Path, default=ROOT / "reproduction" / "isaac61" / "outputs" / "multimodal-capture")
 parser.add_argument("--visualize", action="store_true")
+parser.add_argument("--enable-planner", action="store_true", help="Also initialize production planners.")
 parser.add_argument(
     "--motion-demo", action="store_true", help="Command both wrist joints with a small real sine motion."
 )
@@ -64,6 +66,7 @@ try:
     from utils.load_file import load_yaml
     from utils.multimodal import MultimodalWriter, json_value, write_failed_capture
     from utils.task_layout import load_task_layout, verify_task_scene
+    from utils.task_runtime_config import configure_task_runtime, reset_task_episode
 
     eval_cfg = load_yaml(str(ROOT / "env_cfg" / (args.env_cfg + ".yml")))
     cfg = OmegaConf.create(
@@ -73,22 +76,22 @@ try:
         }
     )
     cfg.tactile = eval_cfg.get("tactile", {})
-    cfg.task_env = load_yaml(str(ROOT / "task/RoboDojo/config" / (args.task + ".yml")))
-    cfg.sim.scene.num_envs = 1
-    cfg.sim.device = "cuda:0"
-    cfg.sim.seed = [0]
-    cfg.camera.default_frequency = eval_cfg["observation"]["collect_freq"]
     task_name, task_class = load_task_class(args.task)
+    cfg.task_env = load_yaml(str(ROOT / "task/RoboDojo/config" / (task_name + ".yml")))
     layout, layout_provenance = load_task_layout(
-        ROOT, task_name, layout_config=args.layout_config, layout_id=args.layout_id, layout_file=args.layout_file
+        ROOT,
+        task_name,
+        layout_config=args.layout_config,
+        layout_id=args.layout_id,
+        layout_file=args.layout_file,
+        eval_seed=args.eval_seed,
     )
     cfg.saved_layouts = [layout]
-    env = task_class(cfg, app, seed=0)
-    env.reset(seed=0)
-    # TaskEnv stages CUDA objects offscreen during reset and calibrates the
-    # empty TacSL gel there. Place the canonical task objects/table afterward,
-    # following EvalEnv.setup_scene, without recalibrating away contact.
-    env.scene_manager.apply_saved_poses(env_idx_list=[0])
+    runtime_profile = configure_task_runtime(
+        cfg, task_name, args.env_cfg, eval_cfg, layout_provenance, enable_planner=args.enable_planner
+    )
+    env = task_class(cfg, app, seed=runtime_profile["episode_seed"])
+    reset_task_episode(env, runtime_profile)
     scene_validation = verify_task_scene(env.scene_manager, layout)
     scene_validation["saved_poses_applied"] = True
     initial_time, initial_frame = simulation_snapshot(env.sim.sim)
@@ -112,7 +115,8 @@ try:
         {
             "task": args.task,
             "env_cfg": args.env_cfg,
-            "seed": 0,
+            "seed": runtime_profile["episode_seed"],
+            "runtime_profile": runtime_profile,
             "requested_collect_frequency_hz": obs.collect_freq,
             "layout": layout_provenance,
             "scene": scene_validation,
@@ -195,6 +199,7 @@ try:
                 "real_runtime": True,
                 "frames": reports,
                 "layout": layout_provenance,
+                "runtime_profile": runtime_profile,
                 "scene": final_scene_validation,
                 "scene_initial": scene_validation,
                 "scene_final": final_scene_validation,

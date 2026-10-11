@@ -18,6 +18,7 @@ parser.add_argument("--env-cfg", default="arx_x5_rgbd")
 parser.add_argument("--output", type=Path, default=ROOT / "reproduction/task-smoke.json")
 parser.add_argument("--layout-config", default="arx_x5")
 parser.add_argument("--layout-id", type=int, default=0)
+parser.add_argument("--eval-seed", type=int, default=0, help="Actual saved-layout and support-trajectory cohort.")
 parser.add_argument("--layout-file", type=Path)
 parser.add_argument(
     "--replay-layout-ids", type=int, nargs="*", default=[], help="Preload and reset a finite replay cohort"
@@ -49,6 +50,7 @@ try:
     from task.RoboDojo.task_registry import load_task_class
     from utils.load_file import load_yaml
     from utils.task_layout import load_task_layout, verify_task_scene
+    from utils.task_runtime_config import configure_task_runtime, episode_profile, reset_task_episode
 
     eval_cfg = load_yaml(str(ROOT / "env_cfg" / (args.env_cfg + ".yml")))
     cfg = OmegaConf.create(
@@ -57,20 +59,22 @@ try:
             for key in ("sim", "scene", "camera", "robot")
         }
     )
-    cfg.task_env = load_yaml(str(ROOT / "task/RoboDojo/config" / (args.task + ".yml")))
-    cfg.sim.scene.num_envs = 1
-    cfg.sim.device = "cuda:0"
-    cfg.sim.seed = [0]
-    if not args.enable_planner:
-        for robot in cfg.robot.robots:
-            robot.need_planner = False
-    cfg.camera.default_frequency = eval_cfg["observation"]["collect_freq"]
+    task_name, task_class = load_task_class(args.task)
+    cfg.tactile = eval_cfg.get("tactile", {})
+    cfg.task_env = load_yaml(str(ROOT / "task/RoboDojo/config" / (task_name + ".yml")))
     layout, layout_provenance = load_task_layout(
-        ROOT, args.task, layout_config=args.layout_config, layout_id=args.layout_id, layout_file=args.layout_file
+        ROOT,
+        task_name,
+        layout_config=args.layout_config,
+        layout_id=args.layout_id,
+        layout_file=args.layout_file,
+        eval_seed=args.eval_seed,
     )
     cfg.saved_layouts = [layout]
     replay_layouts = [
-        load_task_layout(ROOT, args.task, layout_config=args.layout_config, layout_id=layout_id)
+        load_task_layout(
+            ROOT, task_name, layout_config=args.layout_config, layout_id=layout_id, eval_seed=args.eval_seed
+        )
         for layout_id in args.replay_layout_ids
     ]
     if args.probe_mass_variant:
@@ -90,12 +94,12 @@ try:
 
         inventory, inventory_audit = build_retained_inventory([layout, *[row for row, _ in replay_layouts]])
         cfg.retained_layout_inventory = inventory
-    _, task_class = load_task_class(args.task)
+    runtime_profile = configure_task_runtime(
+        cfg, task_name, args.env_cfg, eval_cfg, layout_provenance, enable_planner=args.enable_planner
+    )
     original_cfg = deepcopy(cfg)
-    env = task_class(cfg, app, seed=0)
-    env.reset(seed=0)
-    # Match EvalEnv.setup_scene: bare TaskEnv.reset stages CUDA assets offscreen.
-    env.scene_manager.apply_saved_poses(list(range(env.num_envs)))
+    env = task_class(cfg, app, seed=runtime_profile["episode_seed"])
+    reset_task_episode(env, runtime_profile)
 
     def native_rigid_properties():
         properties = {}
@@ -166,6 +170,7 @@ try:
             "RGBD observation capture",
         ],
         "task_runtime": task_runtime,
+        "runtime_profile": runtime_profile,
         "camera_shapes": shapes,
         "policy_evaluation": False,
         "planner_initialized": args.enable_planner,
@@ -178,8 +183,8 @@ try:
     result["replayed_layouts"] = []
     for replay_layout, replay_provenance in replay_layouts:
         env.scene_manager.layout_manager.set_saved_layout(0, replay_layout)
-        env.reset(seed=0)
-        env.scene_manager.apply_saved_poses([0])
+        replay_profile = episode_profile(runtime_profile, replay_provenance)
+        reset_task_episode(env, replay_profile)
         for _ in range(10):
             env.sim_step(render=False)
         replay_runtime = validate_task_runtime(env)
@@ -195,6 +200,7 @@ try:
                 "layout": replay_provenance,
                 "scene": replay_scene,
                 "task_runtime": replay_runtime,
+                "runtime_profile": replay_profile,
                 "native_rigid_properties": native_rigid_properties(),
             }
         )
@@ -202,9 +208,8 @@ try:
     repeated_scenes = [scene_evidence]
     env.close()
     for repeat in range(1, args.repeat_envs):
-        env = task_class(deepcopy(original_cfg), app, seed=0)
-        env.reset(seed=0)
-        env.scene_manager.apply_saved_poses(list(range(env.num_envs)))
+        env = task_class(deepcopy(original_cfg), app, seed=runtime_profile["episode_seed"])
+        reset_task_episode(env, runtime_profile)
         validate_task_runtime(env)
         repeated_scenes.append(verify_task_scene(env.scene_manager, layout))
         repeated_obs = ObsManager(deepcopy(obs_cfg), 1, env.dt, args.task, {}, seeds_per_env=env.env_seed_list)

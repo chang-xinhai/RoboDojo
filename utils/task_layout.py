@@ -92,18 +92,27 @@ def expected_object_counts(layout):
     return counts
 
 
-def load_task_layout(root, task, layout_config="arx_x5", layout_id=0, layout_file=None):
+def load_task_layout(root, task, layout_config="arx_x5", layout_id=0, layout_file=None, eval_seed=0):
     """Load the fixed-seed eval layout before the first environment reset.
 
     RGBD and multimodal observation profiles use the arx_x5 embodiment layout;
     an explicit file can be supplied for another embodiment or custom scene.
     """
-    if layout_id < 0:
-        raise ValueError("layout_id must be nonnegative")
+    for name, value in (("layout_id", layout_id), ("eval_seed", eval_seed)):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{name} must be a nonnegative integer")
     path = (
         Path(layout_file)
         if layout_file is not None
-        else (Path(root) / "Assets" / "Eval_Layout" / "RoboDojo" / layout_config / "0" / f"{task}_{layout_id}.json")
+        else (
+            Path(root)
+            / "Assets"
+            / "Eval_Layout"
+            / "RoboDojo"
+            / layout_config
+            / str(eval_seed)
+            / f"{task}_{layout_id}.json"
+        )
     )
     path = path.resolve()
     raw = path.read_bytes()
@@ -116,6 +125,8 @@ def load_task_layout(root, task, layout_config="arx_x5", layout_id=0, layout_fil
         "sha256": hashlib.sha256(raw).hexdigest(),
         "layout_config": layout_config,
         "layout_id": int(layout_id),
+        "eval_seed": eval_seed,
+        "episode_seed": layout_id,
         "task": task,
         "expected_object_counts": expected,
     }
