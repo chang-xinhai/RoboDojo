@@ -245,8 +245,20 @@ class ArticulationObject(SingleArticulation):
     def initialize(self):
         self.physics_sim_view = SimulationManager.get_physics_sim_view()
         super().initialize(physics_sim_view=self.physics_sim_view)
-        self.upper_joint_positions = self.dof_properties["upper"].copy()
-        self.lower_joint_positions = self.dof_properties["lower"].copy()
+        # The legacy aggregate property also copies effort/gain CUDA tensors
+        # implicitly into NumPy. Query only the native position limits and make
+        # this host metadata boundary explicit for either Torch or NumPy views.
+        limits = self._articulation_view.get_dof_limits()
+        if limits is None:
+            raise RuntimeError(f"Native articulation DOF limits are unavailable: {self._prim_path}")
+        if isinstance(limits, torch.Tensor):
+            limits = limits.detach().cpu().numpy()
+        else:
+            limits = np.asarray(limits)
+        if limits.shape != (1, self.num_dof, 2):
+            raise ValueError(f"Unexpected native articulation limit shape for {self._prim_path}: {limits.shape}")
+        self.lower_joint_positions = limits[0, :, 0].copy()
+        self.upper_joint_positions = limits[0, :, 1].copy()
         self.initial_joint_positions = self.get_current_joint_positions()
         self.initial_drive_targets = self._capture_drive_targets()
         self.app = omni.kit.app.get_app()
