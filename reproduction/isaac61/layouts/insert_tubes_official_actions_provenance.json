@@ -1,0 +1,61 @@
+{
+  "source": "/data/projects/DepthUMI/data/robodojo_official_pool/insert_tubes/data/RoboDojo/insert_tubes/arx_x5/data/episode_0000000.hdf5",
+  "source_sha256": "ce079f7ef7ecb63fdaabc6d24eacab3e4898f59321a692145901c6709c740bbe",
+  "layout_provenance": "inference_from_official_ee_actions; no supplied source layout association",
+  "initial_pose_authoring_only": true,
+  "standard_task_assets_physics_and_scale_preserved": true,
+  "extra_objects": [],
+  "tube_inference": [
+    {
+      "label": "tube0",
+      "source_arm": "left",
+      "source_frame": 38,
+      "inferred_root_xyz": [
+        -0.28509206543152527,
+        -0.1168781940577494,
+        0.7754608052304045
+      ],
+      "authored_initial_position": [
+        -0.28509206543152527,
+        -0.1168781940577494,
+        0.7808752236133516
+      ],
+      "inference_grasp_along_tube_m": 0.085
+    },
+    {
+      "label": "tube1",
+      "source_arm": "right",
+      "source_frame": 138,
+      "inferred_root_xyz": [
+        0.1997253446162889,
+        -0.25187197180780996,
+        0.7755695284345848
+      ],
+      "authored_initial_position": [
+        0.1997253446162889,
+        -0.25,
+        0.7808752236133516
+      ],
+      "inference_grasp_along_tube_m": 0.085
+    },
+    {
+      "label": "tube2",
+      "source_arm": "left",
+      "source_frame": 238,
+      "inferred_root_xyz": [
+        -0.31159859317774596,
+        -0.20781007032942111,
+        0.7755162207979837
+      ],
+      "authored_initial_position": [
+        -0.31159859317774596,
+        -0.20781007032942111,
+        0.7808752236133516
+      ],
+      "inference_grasp_along_tube_m": 0.085
+    }
+  ],
+  "rack_inference": "root (0,.020,.795), yaw -7.2deg inferred from three release EE actions and native rack hole geometry; must pass real native task checks",
+  "layout_file": "insert_tubes_official_actions_initial.json",
+  "source_layout_association": "not provided by original HDF5; this is a separately inferred initial layout, not a canonical episode-id claim"
+}
