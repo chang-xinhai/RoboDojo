@@ -12,7 +12,7 @@ import numpy as np
 from omegaconf import DictConfig
 import omni.kit.commands
 import omni.usd
-from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
+from pxr import Gf, Sdf, UsdGeom, UsdPhysics, UsdShade
 import torch
 
 
@@ -235,55 +235,36 @@ class GeometryObject(SingleGeometryPrim):
         self.set_local_scale(np.array(self.scale))
 
     def get_state(self, is_relative: bool = False) -> dict[str, torch.Tensor]:
-        """Get the state of the geometry object.
+        """Return an owned CPU float32 XYZ/WXYZ snapshot of static USD geometry.
 
-        Args:
-            is_relative: If True, positions are relative to environment origin. Defaults to False.
-
-        Returns:
-            Dictionary containing:
-                - root_pose: torch.Tensor, shape (7,), position (3) and quaternion (4)
-                - asset_info: dict with usd_path and primitive_type
+        ``is_relative`` subtracts the environment origin once. Static geometry
+        uses its authored world transform; scale is removed from the quaternion.
         """
         try:
-            import omni.usd
-
             world_tf = omni.usd.get_world_transform_matrix(self.prim)
             translation = np.array(world_tf.ExtractTranslation(), dtype=np.float32)
-            rot_quat = world_tf.ExtractRotationQuat()
+            rot_quat = Gf.Transform(world_tf).GetRotation().GetQuat()
             orientation = np.array([rot_quat.GetReal(), *rot_quat.GetImaginary()], dtype=np.float32)
-        except (AttributeError, RuntimeError) as e:
-            try:
-                translation = self.get_translation()
-                orientation = self.get_orientation()
-                translation = np.array(translation, dtype=np.float32)
-                orientation = np.array(orientation, dtype=np.float32)
-            except (AttributeError, RuntimeError):
-                print(f"Warning: Failed to get pose for {self._prim_path}: {e}")
-                translation = np.zeros(3, dtype=np.float32)
-                orientation = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
-        if not isinstance(translation, torch.Tensor):
-            translation = torch.tensor(translation, dtype=torch.float32)
-        if not isinstance(orientation, torch.Tensor):
-            orientation = torch.tensor(orientation, dtype=torch.float32)
-        if translation.dim() > 1:
-            translation = translation.squeeze()
-        if orientation.dim() > 1:
-            orientation = orientation.squeeze()
-        root_pose = torch.cat([translation, orientation])
-        if is_relative and hasattr(self, "env_origin"):
-            env_origin_tensor = (
-                torch.tensor(self.env_origin, dtype=torch.float32, device=root_pose.device)
-                if isinstance(self.env_origin, np.ndarray)
-                else self.env_origin
-            )
-            if env_origin_tensor.dim() == 0:
-                env_origin_tensor = env_origin_tensor.unsqueeze(0)
-            if env_origin_tensor.shape[0] < 3:
-                env_origin_tensor = torch.cat(
-                    [env_origin_tensor, torch.zeros(3 - env_origin_tensor.shape[0], device=env_origin_tensor.device)]
-                )
-            root_pose[:3] -= env_origin_tensor[:3]
+        except (AttributeError, RuntimeError) as error:
+            raise RuntimeError(f"Cannot read the static geometry world pose for {self._prim_path}") from error
+        if translation.shape != (3,) or orientation.shape != (4,):
+            raise ValueError(f"Invalid static geometry pose shape for {self._prim_path}")
+        if not np.isfinite(translation).all() or not np.isfinite(orientation).all():
+            raise ValueError(f"Non-finite static geometry pose for {self._prim_path}")
+        quat_norm = float(np.linalg.norm(orientation))
+        if quat_norm <= np.finfo(np.float32).eps:
+            raise ValueError(f"Invalid static geometry quaternion for {self._prim_path}")
+        orientation /= quat_norm
+        root_pose = torch.from_numpy(np.concatenate((translation, orientation)))
+        if is_relative:
+            origin = self.env_origin
+            if isinstance(origin, torch.Tensor):
+                env_origin = origin.detach().to(device="cpu", dtype=torch.float32).reshape(-1)
+            else:
+                env_origin = torch.as_tensor(origin, dtype=torch.float32, device="cpu").reshape(-1)
+            if env_origin.numel() != 3 or not bool(torch.isfinite(env_origin).all()):
+                raise ValueError(f"Environment origin must contain three finite coordinates for {self._prim_path}")
+            root_pose[:3] -= env_origin
         return {"root_pose": root_pose}
 
     def initialize(self):
