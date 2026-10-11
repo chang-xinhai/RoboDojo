@@ -76,12 +76,22 @@ zero tolerance, and the semantic indexing contract. Unknown assets are not
 automatically welded. Collapsed triangles, duplicate triangles and nonmanifold
 edges after welding are rejected rather than silently removed.
 
-All six original bundled models passed actual Isaac Sim 6.1 GPU motion, rigid
-ground contact, zero-velocity nodal reset, next-step gravity acceleration and RGB
-reset-projection checks after this conversion. Reports are retained in
-`reproduction/isaac61/outputs/scene-seam-00001-61` through the corresponding
-`scene-seam-00011-61` directories for IDs 1, 4, 6, 7, 9 and 11. These standalone
-checks complement the separate canonical fold task/reward integration tests.
+The strict native checks cover all six original bundled models: GPU motion,
+rigid ground contact, zero-velocity nodal reset, next-step gravity acceleration
+and RGB reset-projection. Their output directories are
+`reproduction/isaac61/outputs/scene-seam-strict-00001-61` through the corresponding
+`scene-seam-strict-00011-61` directories for IDs 1, 4, 6, 7, 9 and 11. These
+standalone checks complement canonical fold task/reward integration tests.
+
+The standalone scene explicitly allocates 4,194,304 deformable surface contacts
+using `PhysxSceneAPI.gpuMaxDeformableSurfaceContacts`. Its deferred Kit log
+observer rejects known PhysX data loss, cooking failure, assertions and missing
+native bodies. It drains the main-thread log queue before accepting solver data
+and before writing a passed report. An overflow-invalidated numerical check is
+not accepted even if its positions and images appear plausible. Earlier probe
+outputs without this guard are archived as preliminary evidence; some contained
+contact buffer overflow and are excluded from final acceptance. Raw process logs
+must also pass `reproduction.isaac61.check_tasks.audit_native_log`.
 
 The following old behaviors have no direct replacement and raise explicit
 `NotImplementedError`: nonzero wind/lift/drag; cloth PBD adhesion, cohesion,
@@ -137,13 +147,14 @@ fluid motion/reset. They export the stage and record the measured particle/nodal
 positions. Reports identify the actual package and PhysX extension versions.
 A passing CPU test alone does not establish runtime physics validity.
 
-Three native scene-object GPU runs passed on the installed **Isaac Sim 6.1.0.0 /
-OmniPhysX 110.3.2**. The gravity-2 plane and actual Top_Long/00001 garment passed
-nodal motion, rigid ground contact, zero-velocity reset, next-step acceleration,
-and projected live nodes versus actual reset RGB checks. The fluid passed actual
-particle motion, reset, and reset RGB changes with GPU dynamics and host readback.
-These native checks do not replace the separate full Isaac Lab TaskEnv/robot
-checks. The gallery builder validates the actual report versions before creating
+The three gallery inputs check **Isaac Sim 6.1.0.0 / OmniPhysX 110.3.2**:
+gravity-2 plane, actual Top_Long/00001 garment, and native fluid. The cloth checks
+cover nodal motion, rigid ground contact, zero-velocity reset, next-step
+acceleration and projected live nodes versus actual reset RGB. The fluid check
+covers particle motion, reset and reset RGB changes with GPU dynamics and host
+readback. These native checks do not replace full Isaac Lab TaskEnv/robot
+checks. The gallery builder requires passed reports, exact runtime versions and
+a passed native error guard before creating
 `reproduction/isaac61/outputs/physics-gallery/index.html` and `physics-captures.png`.
 
 Verified against the installed `omni.physx-110.3.2` implementation of

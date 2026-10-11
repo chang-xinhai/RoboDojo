@@ -9,6 +9,20 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 
+def validate_report(report, source):
+    if report.get("status") != "passed" or not report.get("real_runtime"):
+        raise ValueError(f"{source} is not a passed real-runtime capture")
+    if report.get("isaacsim_version") != "6.1.0.0" or report.get("physx_extension") != "omni.physx-110.3.2":
+        raise ValueError(f"{source} does not contain the expected actual simulator/physics versions")
+    guard = report.get("native_error_guard", {})
+    if (
+        guard.get("policy") != "physx-known-fatal.v1"
+        or guard.get("known_fatal_count") != 0
+        or guard.get("errors") != []
+    ):
+        raise ValueError(f"{source} lacks a passed native physics error guard")
+
+
 def main():
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
@@ -32,10 +46,7 @@ def main():
     for row, (directory, title, kind) in enumerate(cases):
         source = args.inputs / directory
         report = json.loads((source / "report.json").read_text())
-        if report.get("status") != "passed" or not report.get("real_runtime"):
-            raise ValueError(f"{source} is not a passed real-runtime capture")
-        if report.get("isaacsim_version") != "6.1.0.0" or report.get("physx_extension") != "omni.physx-110.3.2":
-            raise ValueError(f"{source} does not contain the expected actual simulator/physics versions")
+        validate_report(report, source)
         states = ["before", "after", "contact", "reset"] if kind == "cloth" else ["before", "after", "reset"]
         y = 58 + row * 319
         draw.text((16, y), title, font=font, fill="white")

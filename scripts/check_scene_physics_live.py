@@ -24,10 +24,13 @@ def main():
     parser.add_argument("--fluid-only", action="store_true", help="Test fluids separately using CPU readback")
     parser.add_argument("--gravity-scale", type=float, default=1.0, help="Explicit surface acceleration calibration")
     parser.add_argument("--garment-asset", type=Path, help="Use a bundled garment USD and its adjacent metadata.json")
+    parser.add_argument("--surface-contact-capacity", type=int, default=4194304)
     parser.add_argument(
         "--cpu-readback", action="store_true", help="Keep GPU dynamics, enable host readback required by PBD fluids"
     )
     args = parser.parse_args()
+    if args.surface_contact_capacity <= 0:
+        parser.error("--surface-contact-capacity must be positive")
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root))
     args.output = args.output.resolve()
@@ -51,6 +54,8 @@ def main():
     app = SimulationApp(
         {"headless": True, "fast_shutdown": True, "extra_args": shlex.split(os.environ.get("ROBODOJO_KIT_ARGS", ""))}
     )
+    native_errors = []
+    native_observer = _observe_native_errors(native_errors)
     exit_code = 0
     try:
         from isaacsim.core.api import SimulationContext
@@ -60,7 +65,7 @@ def main():
         import numpy as np
         from omni.physx.scripts import physicsUtils
         from PIL import Image
-        from pxr import Gf, UsdGeom, UsdLux
+        from pxr import Gf, PhysxSchema, UsdGeom, UsdLux
         import torch
 
         from env.scene_manager.objects.garment import GarmentObject
@@ -72,6 +77,10 @@ def main():
         sim.get_physics_context().enable_gpu_dynamics(True)
         sim.get_physics_context().set_broadphase_type("GPU")
         stage = get_current_stage()
+        scene_api = PhysxSchema.PhysxSceneAPI.Apply(stage.GetPrimAtPath(sim.get_physics_context().prim_path))
+        # Two full-resolution garments can exceed the legacy context's
+        # default contact allocation. Author the actual 6.1 surface budget.
+        scene_api.GetGpuMaxDeformableSurfaceContactsAttr().Set(args.surface_contact_capacity)
         physicsUtils.add_ground_plane(stage, "/World/Ground", "Z", 10, Gf.Vec3f(0), Gf.Vec3f(0.5))
         UsdLux.DomeLight.Define(stage, "/World/Light").CreateIntensityAttr(500)
         camera = Camera("/World/PhysicsCamera", resolution=(320, 240))
@@ -85,7 +94,7 @@ def main():
         camera.set_focal_length(12.0)
         camera.set_horizontal_aperture(20.0)
         if args.fluid_only:
-            _validate_fluid_only(args, sim, stage, camera)
+            _validate_fluid_only(args, sim, stage, camera, native_errors)
             return 0
         if args.cpu_readback:
             raise ValueError("Surface deformable tensor reads require the GPU pipeline; test fluids with --fluid-only")
@@ -131,6 +140,7 @@ def main():
         sim.initialize_physics()
         sim.play()
         sim.step(render=False)
+        _flush_native_errors(native_errors)
         cloth.initialize()
         camera.initialize()
         for _ in range(20):
@@ -160,6 +170,7 @@ def main():
             "surface_parameters": cloth.surface_parameters,
             "cloth_nodes": len(before),
             "cloth_simulation_nodes": int(cloth._surface_view.get_simulation_nodal_positions().shape[1]),
+            "surface_contact_capacity": int(scene_api.GetGpuMaxDeformableSurfaceContactsAttr().Get()),
             "cpu_readback_requested": args.cpu_readback,
             "crossenv_offset_m": crossenv_delta.tolist(),
             "cloth_drop_m": float(np.mean(before[:, 2] - after[:, 2])),
@@ -229,6 +240,7 @@ def main():
         Image.fromarray(rgb_reset).save(args.output / "cloth_reset.png")
         assert np.all(rendered_center >= projected.min(axis=0) - 10), "Rendered cloth lags behind the physical reset"
         assert np.all(rendered_center <= projected.max(axis=0) + 10), "Rendered cloth lags behind the physical reset"
+        _flush_native_errors(native_errors)
         report.update(
             status="passed",
             real_runtime=True,
@@ -238,6 +250,7 @@ def main():
             .get_extension_manager()
             .get_enabled_extension_id("omni.physx"),
             device="cuda:0",
+            native_error_guard={"policy": "physx-known-fatal.v1", "known_fatal_count": 0, "errors": []},
         )
         np.savez(args.output / "cloth_motion.npz", before=before, after=after, contact=contact, reset=restored)
         if not stage.Flatten().Export(str((args.output / "validated_scene.usda").resolve())):
@@ -250,15 +263,63 @@ def main():
         error = traceback.format_exc()
         print(error, file=sys.stderr, flush=True)
         (args.output / "report.json").write_text(
-            json.dumps({"status": "failed", "real_runtime": True, "error": error}, indent=2) + "\n"
+            json.dumps(
+                {"status": "failed", "real_runtime": True, "error": error, "native_physics_errors": native_errors},
+                indent=2,
+            )
+            + "\n"
         )
     finally:
+        del native_observer
         # SimulationApp fast shutdown exits the process: preserve the failure code.
         app.close(exit_code=exit_code)
     return exit_code
 
 
-def _validate_fluid_only(args, sim, stage, camera):
+def _observe_native_errors(errors):
+    """Inspect deferred native logs on Kit's main thread.
+
+    Immediate Python callbacks can block a PhysX worker while a synchronous
+    simulation step holds Python's GIL. Deferred events avoid that deadlock.
+    """
+    from carb.eventdispatcher import get_eventdispatcher
+    import carb.logging
+    import omni.kit.app
+
+    from reproduction.isaac61.check_tasks import known_native_error
+
+    def on_log(event):
+        level = int(event["level"] or 0)
+        if level < carb.logging.LEVEL_WARN:
+            return
+        message = str(event["message"] or event["msg"] or "")
+        module = str(event["source"] or event["channel"] or "")
+        if not module and ("PhysX error:" in message or "PxValidateTriangleMesh" in message):
+            module = "omni.physx.plugin"
+        severity = "Error" if level >= carb.logging.LEVEL_ERROR else "Warning"
+        line = f"[{severity}] [{module}] {message}"
+        kind = known_native_error(line)
+        if kind:
+            errors.append({"kind": kind, "message": message, "module": module})
+
+    return get_eventdispatcher().observe_event(
+        event_name=omni.kit.app.GLOBAL_EVENT_ERROR_LOG,
+        on_event=on_log,
+        observer_name="RoboDojo native physics acceptance guard",
+    )
+
+
+def _flush_native_errors(errors):
+    from omni.kit.app import get_app
+
+    # render=False physics steps do not drain the main-thread log queue.
+    # Drain explicitly before accepting any solver data or writing PASS.
+    get_app().update()
+    if errors:
+        raise RuntimeError(f"Native physics errors invalidate this run: {errors}")
+
+
+def _validate_fluid_only(args, sim, stage, camera, native_errors):
     import carb
     import numpy as np
     from omni.physx import get_physx_interface
@@ -291,6 +352,7 @@ def _validate_fluid_only(args, sim, stage, camera):
         sim.initialize_physics()
         sim.play()
         sim.step(render=False)
+        _flush_native_errors(native_errors)
         fluid.initialize()
         before = fluid.get_particle_positions()[0].copy()
         camera.initialize()
@@ -337,6 +399,8 @@ def _validate_fluid_only(args, sim, stage, camera):
             np.mean(np.abs(rgb_reset.astype(float) - rgb_after.astype(float)))
         )
         assert report["fluid_reset_rgb_mean_abs_change"] > 0.01, "PBD reset did not reach the renderer"
+        _flush_native_errors(native_errors)
+        report["native_error_guard"] = {"policy": "physx-known-fatal.v1", "known_fatal_count": 0, "errors": []}
         np.savez(args.output / "fluid_motion.npz", before=before, after=after, reset=fluid.get_particle_positions()[0])
         Image.fromarray(rgb_before).save(args.output / "fluid_before.png")
         Image.fromarray(rgb_after).save(args.output / "fluid_after.png")
