@@ -126,6 +126,9 @@ try:
     obs.initialize(env)
     for _ in range(10):
         env.sim_step(render=False)
+    from reproduction.isaac61.task_runtime_probe import validate_task_runtime
+
+    task_runtime = validate_task_runtime(env)
     scene_evidence = verify_task_scene(env.scene_manager, layout)
     obs.render_for_capture()
     data = obs.get_obs()
@@ -155,7 +158,14 @@ try:
         "task": args.task,
         "env_cfg": args.env_cfg,
         "num_envs": 1,
-        "checks": ["task scene initialization", "robot reset", "RGBD observation capture"],
+        "checks": [
+            "task scene initialization",
+            "robot reset",
+            "task instruction generation",
+            "task reward evaluation",
+            "RGBD observation capture",
+        ],
+        "task_runtime": task_runtime,
         "camera_shapes": shapes,
         "policy_evaluation": False,
         "planner_initialized": args.enable_planner,
@@ -172,6 +182,7 @@ try:
         env.scene_manager.apply_saved_poses([0])
         for _ in range(10):
             env.sim_step(render=False)
+        replay_runtime = validate_task_runtime(env)
         replay_scene = verify_task_scene(env.scene_manager, replay_layout)
         obs.render_for_capture()
         replay_frame = obs.get_obs()[0]
@@ -180,7 +191,12 @@ try:
             assert rgb is not None and rgb.any(), (replay_provenance, name)
             assert np.any(np.isfinite(camera["depth"]) & (camera["depth"] > 0)), (replay_provenance, name)
         result["replayed_layouts"].append(
-            {"layout": replay_provenance, "scene": replay_scene, "native_rigid_properties": native_rigid_properties()}
+            {
+                "layout": replay_provenance,
+                "scene": replay_scene,
+                "task_runtime": replay_runtime,
+                "native_rigid_properties": native_rigid_properties(),
+            }
         )
     stage_ids = [str(env.sim.sim.stage.GetRootLayer().identifier)]
     repeated_scenes = [scene_evidence]
@@ -189,6 +205,7 @@ try:
         env = task_class(deepcopy(original_cfg), app, seed=0)
         env.reset(seed=0)
         env.scene_manager.apply_saved_poses(list(range(env.num_envs)))
+        validate_task_runtime(env)
         repeated_scenes.append(verify_task_scene(env.scene_manager, layout))
         repeated_obs = ObsManager(deepcopy(obs_cfg), 1, env.dt, args.task, {}, seeds_per_env=env.env_seed_list)
         repeated_obs.initialize(env)
