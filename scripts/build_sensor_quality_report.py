@@ -139,6 +139,81 @@ def reference_evidence(directory, inputs):
     return {"status": "verified_reference", "frames": records, "original_manifest": manifest, "context": extras}
 
 
+def component_preview(reader, original):
+    """Verify the component viewer's optical support ranking against raw depth.
+
+    Its selected frame is an integer and its criterion is optical support, not
+    force magnitude. Keep the producer JSON intact and return separate evidence.
+    """
+    from env.tactile_manager.contact_metrics import contact_frame_metrics
+    from utils.multimodal_hdf5 import TACTILE_COMPONENT_SCHEMA
+
+    if reader.metadata.get("observation_schema") != TACTILE_COMPONENT_SCHEMA:
+        raise ValueError("Integer preview selection requires actual tactile component HDF5")
+    if original.get("observation_schema") != TACTILE_COMPONENT_SCHEMA:
+        raise ValueError("Component preview must declare its original observation schema")
+    criterion = "maximum sum of actual largest positive optical-depth components over four pads; first tie"
+    if original.get("selection") != criterion:
+        raise ValueError("Unrecognized component preview selection criterion")
+    index = original.get("selected_frame")
+    if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(reader):
+        raise ValueError("Component selected-frame index is outside the recording")
+    scores = []
+    for frame_index in range(len(reader)):
+        frame = reader.read_frame(frame_index)
+        score = 0.0
+        for side in ("left", "right"):
+            for finger in ("finger_0", "finger_1"):
+                recorded = frame["contact_metrics"][side][finger]
+                threshold = recorded.get("depth_threshold_m")
+                minimum = recorded.get("minimum_component_pixels")
+                if (
+                    isinstance(threshold, bool)
+                    or not isinstance(threshold, (int, float))
+                    or not math.isfinite(threshold)
+                    or threshold <= 0
+                    or isinstance(minimum, bool)
+                    or not isinstance(minimum, int)
+                    or minimum < 1
+                ):
+                    raise ValueError("Component preview lacks valid original optical metric thresholds")
+                actual = contact_frame_metrics(
+                    frame["tactile"][side][finger],
+                    depth_threshold_m=threshold,
+                    minimum_component_pixels=minimum,
+                )
+                value = recorded.get("largest_component_pixel_fraction")
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    or not math.isclose(value, actual["largest_component_pixel_fraction"], abs_tol=1e-12)
+                    or recorded.get("closed_contour_hole_count") != actual["closed_contour_hole_count"]
+                ):
+                    raise ValueError("Component optical support/holes differ from actual HDF5 depth")
+                score += actual["largest_component_pixel_fraction"]
+        scores.append(score)
+    strongest = max(range(len(scores)), key=scores.__getitem__)
+    if index != strongest:
+        raise ValueError("Component preview does not show the strongest optical support frame/first tie")
+    selected = reader.read_frame(index)
+    if original.get("selected_physics_frame") != selected["sync"]["physics_frame"]:
+        raise ValueError("Component selected-frame clock differs from actual HDF5")
+    if original.get("selected_phase") != selected["contact_demo"]["last_command"]["phase"]:
+        raise ValueError("Component selected-frame phase differs from actual HDF5")
+    if original.get("frame_count") != len(reader):
+        raise ValueError("Component preview frame count differs from actual HDF5")
+    return {
+        "index": index,
+        **selected["sync"],
+        "score": scores[index],
+        "score_semantics": "sum of largest positive optical-depth components over four pads (fraction)",
+        "selected_by": criterion,
+        "raw_optical_support_recomputed": True,
+        "policy_evaluation": False,
+    }
+
+
 def bundle(directory, kind, inputs):
     """Keep failed/incomplete evidence visible; require linked audit for passed."""
     directory = directory.resolve(strict=True)
@@ -270,6 +345,19 @@ def bundle(directory, kind, inputs):
                 raise ValueError("Preview is sourced from a different HDF5 episode")
         if original.get("source_hdf5"):
             selected = original.get("selected_frame")
+            if kind == "tactile" and isinstance(selected, int) and not isinstance(selected, bool):
+                if str(ROOT) not in sys.path:
+                    sys.path.insert(0, str(ROOT))
+                from utils.multimodal_hdf5 import HDF5Reader
+
+                with HDF5Reader(source) as reader:
+                    result["verified_preview_selection"] = component_preview(reader, original)
+                result["preview_selection_verified"] = True
+                result["preview_contact_kind"] = (
+                    "positive_optical_support" if result["verified_preview_selection"]["score"] > 0 else "noncontact"
+                )
+                result["visualization"] = original
+                return result
             if not isinstance(selected, dict):
                 raise ValueError("HDF5 preview must record its selected frame")
             index = selected.get("index")
@@ -421,7 +509,7 @@ def media(data, label, output, copy_videos, inputs):
     )
     preview = next((directory / name for name in candidates if name and (directory / name).is_file()), None)
     if preview:
-        selection = visualization.get("selected_frame", {})
+        selection = data.get("verified_preview_selection", visualization.get("selected_frame", {}))
         caption = f"{label} · original saved preview"
         if isinstance(selection, dict) and selection:
             caption += (

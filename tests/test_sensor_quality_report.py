@@ -266,3 +266,123 @@ def test_control_without_source_linkage_is_incomplete_and_input_inventory_is_bou
         (directory / f"frame{index}.npz").write_bytes(b"fixture")
     with pytest.raises(ValueError, match="bounded"):
         control_evidence(directory, [])
+
+
+def audited_component_preview(directory):
+    """Three real typed fixture frames: negative depth, ring contact, less support.
+
+    The idle frame has larger model force deliberately, so force ranking cannot
+    accidentally pass a test for the component's declared optical criterion.
+    """
+    import numpy as np
+
+    from env.tactile_manager.contact_metrics import contact_frame_metrics
+    from tests.test_multimodal import fixture
+    from utils.multimodal_hdf5 import TACTILE_COMPONENT_SCHEMA, HDF5Writer
+
+    directory.mkdir()
+    writer = HDF5Writer(directory, {"fixture_not_runtime": True}, observation_schema=TACTILE_COMPONENT_SCHEMA)
+    for index in range(3):
+        frame = fixture(index + 1)
+        frame["sync"]["schema"] = TACTILE_COMPONENT_SCHEMA
+        del frame["vision"]
+        frame["contact_demo"] = {"last_command": {"phase": f"fixture_phase_{index}"}}
+        frame["contact_metrics"] = {}
+        for side in ("left", "right"):
+            frame["contact_metrics"][side] = {}
+            for finger in ("finger_0", "finger_1"):
+                pad = frame["tactile"][side][finger]
+                pad["rgb"] = np.zeros((24, 24, 3), np.uint8)
+                pad["depth"] = np.ones((24, 24, 1), np.float32)
+                delta = np.full((24, 24), -0.001, np.float32)
+                if index == 1:
+                    delta[3:21, 3:21] = 0.001
+                    delta[8:16, 8:16] = -0.001  # Actual enclosed 64-pixel hole.
+                elif index == 2:
+                    delta[3:11, 3:11] = 0.001
+                pad["optical_depth_delta"] = delta[..., None]
+                pad["normal_force"][:] = -2.0 if index == 0 else 0.1
+                frame["contact_metrics"][side][finger] = contact_frame_metrics(pad)
+        writer.append(frame)
+    source = writer.complete()
+    digest = fingerprint(source)
+    report = {
+        "status": "passed",
+        "real_runtime": True,
+        "fixture_not_runtime": True,
+        "frame_count": 3,
+        "source_hdf5": str(source),
+        "source_hdf5_sha256": digest,
+    }
+    write_json(directory / "report.json", report)
+    write_json(directory / "independent-audit.json", report)
+    preview = {
+        "observation_schema": TACTILE_COMPONENT_SCHEMA,
+        "source_hdf5": str(source),
+        "source_hdf5_sha256": digest,
+        "frame_count": 3,
+        "selected_frame": 1,
+        "selected_physics_frame": 2,
+        "selected_phase": "fixture_phase_1",
+        "selection": "maximum sum of actual largest positive optical-depth components over four pads; first tie",
+    }
+    write_json(directory / "visualization.json", preview)
+    return source, preview
+
+
+def test_component_integer_preview_uses_raw_ring_support_not_force_and_preserves_original_json(tmp_path):
+    source, original = audited_component_preview(tmp_path / "component")
+    result = bundle(source.parent, "tactile", [])
+    assert result["status"] == "passed"
+    assert result["visualization"] == original
+    verified = result["verified_preview_selection"]
+    assert verified["index"] == 1
+    assert verified["score"] == pytest.approx(4 * (18 * 18 - 64) / (24 * 24))
+    assert verified["raw_optical_support_recomputed"] is True
+    assert verified["score_semantics"].endswith("(fraction)")
+    assert result["preview_contact_kind"] == "positive_optical_support"
+
+
+@pytest.mark.parametrize("damage", ["idle", "bool", "clock", "phase", "schema", "criterion"])
+def test_component_integer_preview_rejects_wrong_selection_or_clock(tmp_path, damage):
+    source, original = audited_component_preview(tmp_path / "component")
+    field, value = {
+        "idle": ("selected_frame", 0),
+        "bool": ("selected_frame", True),
+        "clock": ("selected_physics_frame", 123),
+        "phase": ("selected_phase", "wrong"),
+        "schema": ("observation_schema", "invented"),
+        "criterion": ("selection", "maximum force"),
+    }[damage]
+    original[field] = value
+    write_json(source.parent / "visualization.json", original)
+    with pytest.raises(ValueError, match="preview|selected-frame"):
+        bundle(source.parent, "tactile", [])
+
+
+@pytest.mark.parametrize("field,value", [("largest_component_pixel_fraction", 0.99), ("closed_contour_hole_count", 0)])
+def test_component_preview_recomputes_support_and_holes_instead_of_trusting_saved_metrics(tmp_path, field, value):
+    import h5py
+
+    source, _ = audited_component_preview(tmp_path / "component")
+    with h5py.File(source, "r+") as handle:
+        node = handle[f"frames/00000001/contact_metrics/left/finger_0/{field}/value"]
+        node[()] = json.dumps(value)
+    digest = fingerprint(source)
+    for name in ("report.json", "independent-audit.json", "visualization.json"):
+        path = source.parent / name
+        data = json.loads(path.read_text())
+        data["source_hdf5_sha256"] = digest
+        write_json(path, data)
+    with pytest.raises(ValueError, match="support/holes"):
+        bundle(source.parent, "tactile", [])
+
+
+def test_integer_component_preview_cannot_label_full_camera_hdf5_as_component(tmp_path):
+    from scripts.build_sensor_quality_report import component_preview
+    from utils.multimodal_hdf5 import HDF5Reader
+
+    full = audited_capture(tmp_path / "capture")
+    _, declaration = audited_component_preview(tmp_path / "component")
+    with HDF5Reader(full) as reader, pytest.raises(ValueError, match="actual tactile component HDF5"):
+        component_preview(reader, declaration)
