@@ -26,9 +26,14 @@ def initialized_object_factory():
     production = next(
         node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "ArticulationObject"
     )
-    initialize = next(
-        node for node in production.body if isinstance(node, ast.FunctionDef) and node.name == "initialize"
-    )
+    method_names = {
+        "initialize",
+        "_clone_native_joint_buffer",
+        "_clone_native_drive_targets",
+        "_capture_drive_targets",
+    }
+    methods = [node for node in production.body if isinstance(node, ast.FunctionDef) and node.name in method_names]
+    assert {node.name for node in methods} == method_names
 
     class Parent:
         def initialize(self, **kwargs):
@@ -38,7 +43,7 @@ def initialized_object_factory():
         name="Probe",
         bases=[ast.Name(id="Parent", ctx=ast.Load())],
         keywords=[],
-        body=[initialize],
+        body=methods,
         decorator_list=[],
     )
     physics_view = object()
@@ -63,10 +68,17 @@ def initialized_object_factory():
         obj = probe_type()
         obj._prim_path = "/World/articulation"
         obj.num_dof = num_dof
+        obj.physics_cfg = {"reset_drive": True}
+        obj._joint_positions_captured = False
+        obj._drive_targets_captured = False
+        obj.initial_drive_targets = None
         obj.parent_initialize = Mock()
-        obj._articulation_view = SimpleNamespace(get_dof_limits=Mock(return_value=limits))
+        actions = SimpleNamespace(joint_positions=torch.full((1, num_dof), 0.2, dtype=torch.float32))
+        obj._articulation_view = SimpleNamespace(
+            get_dof_limits=Mock(return_value=limits),
+            get_applied_actions=Mock(return_value=actions),
+        )
         obj.get_current_joint_positions = Mock(return_value=torch.zeros(num_dof))
-        obj._capture_drive_targets = Mock(return_value={"joint": 0.2})
         return obj, physics_view, app
 
     return make
@@ -91,7 +103,13 @@ def test_native_limits_are_explicit_host_snapshots(initialized_object_factory, f
     obj.parent_initialize.assert_called_once_with(physics_sim_view=physics_view)
     obj._articulation_view.get_dof_limits.assert_called_once_with()
     torch.testing.assert_close(obj.initial_joint_positions, torch.zeros(3))
-    assert obj.initial_drive_targets == {"joint": 0.2}
+    native_targets = obj._articulation_view.get_applied_actions.return_value.joint_positions
+    obj._articulation_view.get_applied_actions.assert_called_once_with(clone=True)
+    torch.testing.assert_close(obj.initial_drive_targets, torch.full((1, 3), 0.2))
+    assert obj.initial_drive_targets.data_ptr() != native_targets.data_ptr()
+    native_targets.fill_(99)
+    torch.testing.assert_close(obj.initial_drive_targets, torch.full((1, 3), 0.2))
+    assert obj._joint_positions_captured and obj._drive_targets_captured
     app.update.assert_called_once_with()
 
 
@@ -104,7 +122,7 @@ def test_missing_or_mismatched_native_limits_fail_explicitly(initialized_object_
     with pytest.raises(error, match="articulation"):
         obj.initialize()
     obj.get_current_joint_positions.assert_not_called()
-    obj._capture_drive_targets.assert_not_called()
+    obj._articulation_view.get_applied_actions.assert_not_called()
     app.update.assert_not_called()
 
 
@@ -112,3 +130,4 @@ def test_zero_dof_native_articulation_limits(initialized_object_factory):
     obj, _, _ = initialized_object_factory(torch.empty((1, 0, 2)), num_dof=0)
     obj.initialize()
     assert obj.lower_joint_positions.shape == obj.upper_joint_positions.shape == (0,)
+    assert obj.initial_drive_targets.shape == (1, 0)
