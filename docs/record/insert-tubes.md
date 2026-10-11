@@ -31,6 +31,28 @@ bash reproduction/isaac61/run.sh collect \
 
 `episode.hdf5` 保存 head、left_wrist、right_wrist 的 RGB、GT 深度、结构光重建深度和双目 IR，以及左右四个指尖的触觉、力、标定和统一物理时钟。结构光无效深度保留 NaN，不用 GT 填充。
 
+当前默认 `structured_light.backend` 为 `nsl_v2`，推理输入只有原始左右 IR。`depth_sl` 是 NSLv2 的米制左 IR 光学 Z 深度；GT 保持为 RGB 相机的独立渲染真值，两个图像网格不等同。模型、权重、配置、输入哈希与原始有符号视差均可追溯。采集端加载和推理失败直接报错，无传统双目算法回退，详见 [NSLv2 后端说明](../structured_light_nslv2_backend.md)。下述 `full-episode-final` 是先前已验收的历史原始采集，不因离线换模型而被覆写。
+
+对历史全片进行 NSLv2 推理，再导出统一视频：
+
+```bash
+# 原始 1228 帧的三路 IR 全部推理，保存所有模态到新的 HDF5：
+bash reproduction/isaac61/run.sh python reproduction/isaac61/nslv2/export.py \
+  --source reproduction/isaac61/outputs/insert-tubes/full-episode-final/episode.hdf5 \
+  --source-sha256 ee3393033932de9d4422b56f07f6c1ad465b549555bf9346cfa043f1b272d614 \
+  --output reproduction/isaac61/outputs/insert-tubes/nslv2-full-episode
+
+# 三视角 × RGB / GT depth / 左右 IR / NSLv2 depth；底部四指胶面全程显示：
+CUDA_VISIBLE_DEVICES='' bash reproduction/isaac61/run.sh python reproduction/export_episode_video.py \
+  reproduction/isaac61/outputs/insert-tubes/nslv2-full-episode/episode.hdf5 \
+  --layout unified --width 1920 --require-nslv2 \
+  --output reproduction/isaac61/outputs/insert-tubes/nslv2-full-episode/insert-tubes-unified-nslv2.mp4
+```
+
+统一布局保留实际采样时钟和全部帧，不降采样或加速。三路视觉各占一行，视觉模态各占一列；四指胶面和原始 `Fpeak` / `pen` 占底部一行。深度仅在显示时使用共享的 0.03–3 m 色标，超范围饱和、NaN 为紫色；HDF5 深度不裁剪、不补洞。`--require-nslv2` 拒绝任一相机缺少 NSLv2 来源的帧，也拒绝把模型调试的关键帧子集当作完整原始任务视频。
+
+默认模型未启用置信度阈值。完整记录中，接近零的预测视差产生了极端正深度；左腕最大值约 9669553 m，右腕约 20100 m。原始有符号视差、共可见性、有效掩码和米制结果全部保存，不用 GT 判别或删除它。来源与计算验证通过不代表逐像素精度通过；图中显示范围的饱和也不代表这些远距离预测已经被修正。
+
 `native-contact-trace.npz` 独立保留四指尖 × 三试管的距离、未修改的原始力、穿入量和真实姿态；`native-task-inventory.json` 检查初末原装物体、动态试管和无附加固定关节。原始记录用于复核零触觉和任务成功。
 
 ```bash
@@ -56,6 +78,22 @@ HTML 可按帧查看 RGB、光学差分、官方 taxel 力、胶面坐标力，�
 `--tactile-view continuous` 在每一帧显示该帧实际记录的 `raw_optical_rgb`，因此空夹和松爪后仍显示正常胶面。四指分别显示实际 taxel 力向量模长的最大值 `Fpeak`（N）和原始压入量最大值 `pen`（mm）；无接触时两项为零。连续显示不重用静态基线图、不改 HDF5 或原始力。省略此选项时保留原来的接触条件化图像显示。
 
 连续显示版本已完整导出 1228 帧、25 FPS、49.12 秒；相关测试通过 8 项及 13 个子测试。独立复核实际解码的起始、三次夹管和结束画面（帧 0、725、904、1074、1227），四指胶面均与对应帧原始 RGB 一致，起始与结束的力和压入量为零。复核报告为 `reproduction/isaac61/outputs/review/insert-tubes-episode/continuous-video-independent-audit.json`；本次是视频显示验证，沿用下述原生任务全帧验收。
+
+## NSLv2 全量推理与统一预览（2026-10-11）
+
+`reproduction/isaac61/outputs/insert-tubes/nslv2-full-episode/episode.hdf5` 已完整封存：1228 帧、3684 次真实 RTX 5090 推理，耗时 1487.27 秒，实际退出码为 0。推理时源码为 `45720b21bedd51ebf18a13cc8b0992ba2f603791`；权重为显式选择的 `ufm_1.8b_psv_step_00250000.pt`，骨干 BF16、预测头 FP32，关闭 TF32。新文件 SHA256 为 `b00e59777b3f4f40dd4d901791859b5e3c5b8d05d352726a2dc7087a5a23f882`。实际收据和完整身份位于同目录的 `process-exit.json`、`nslv2-processing.json`。
+
+独立全量来源核验已通过全部帧、全部预测，以及约 29.97 GB 的原始数组逐位比对，包含三路 RGB / GT / IR、四指原始胶面、力、穿入量、接触状态、动作、状态、标定和物理时钟。模型输入仅为原始 IR，原始视差和共可见性到米制深度的重建也逐位吻合；没有 GT 或旧 SGBM 回填。报告为 `reproduction/isaac61/outputs/review/nslv2-lineage/full-episode-lineage-audit.json`，实际退出收据为同目录的 `full-episode-lineage-exit.json`。这次是对已验收原生任务的离线视觉推理，没有重新播放物理任务，也不把来源验证当作深度精度认证。
+
+另外在 IsaacSim 6.1 中实际运行了标准任务的两帧直接采集，三路相机共六次 NSLv2 推理，与四指触觉同步保存。输入、输出、模型、标定和时钟哈希核验通过，共享模型只加载一次，采集退出码为 0，日志无原生错误、退出后无模型残留进程。报告为 `reproduction/isaac61/outputs/insert-tubes/nslv2-runtime-smoke-61/runtime-smoke-verification.json`；两帧运行只验证新生产采集路径，不宣称再次完成完整插管任务。
+
+新 HDF5 的交互预览位于 `reproduction/isaac61/outputs/insert-tubes/nslv2-full-episode/viewer-overview/multimodal.html`，共 50 个采样帧，可切换八种触觉模式，默认显示原始胶面。它以每 25 帧一帧的方式展示概览；完整 HDF5 与统一视频保留全部帧。
+
+最终统一视频为同目录的 `insert-tubes-unified-nslv2.mp4`：1920×1620、1228 帧、25 FPS、49.12 秒，三行视觉共 15 个模态图块、底部四个全程显示的原始胶面。使用 H.264 CRF18，降低运动中 IR 散斑的压缩损失；原始 IR 精确值仍以 HDF5 为准。视频 SHA256 为 `9a5c5907ca41664d763ac3d43bbb5a0ab6731292adb8247f0cb67f2d64c0f55b`，渲染源码提交为 `1db3b15f93ea7f69c5926c3df94ea3e312db04ab`，实际导出退出码为 0。
+
+独立视频验收已通过全部 1228 帧的时钟、3684 个 NSLv2 来源标记及实际解码帧数、FPS、时长。另对起始、三次夹管和结束（帧 0、725、904、1074、1227）的 95 个实际解码图块，逐项与 HDF5 的独立变换比对，全部通过未放宽的平均误差 <6 DN、95 分位误差 <25 DN 阈值；最大区域平均误差为 4.46 DN。报告为 `reproduction/isaac61/outputs/review/insert-tubes-episode/unified-nslv2-video-independent-audit.json`，实际 CPU 退出收据为同目录的 `unified-nslv2-video-independent-process-exit.json`。像素比对覆盖这五个关键帧，不宣称重新对全部 1228 帧做像素精度验证。
+
+本次 NSLv2 / 同步 / HDF5 / 可视化 CPU 回归通过 57 项测试和 36 项子测试；提高视频编码质量后，相关编码、解码与源文件保持测试另通过 9 项测试和 5 项子测试。之前未达到 IR 图块编码误差阈值的 CRF23 视频及其实际退出凭据保留于 `crf23-attempt/`，失败诊断也保留；最终交付使用上述已验收的 CRF18 视频。
 
 ## 已完成的原生记录（2026-10-11）
 
@@ -85,9 +123,9 @@ CPU 回归通过 569 项测试和 97 项子测试。独立完整审查还核验�
 
 本次 HDF5 SHA256：`ee3393033932de9d4422b56f07f6c1ad465b549555bf9346cfa043f1b272d614`。捕获时源码提交记录为 `681a2bb`，当次实际运行文件的哈希另行记录；独立审查确认所有采集运行依赖的源码字节一致。审查时仓库为 `d63d7fc`，之后的离线工具和文档提交不作为本次捕获提交。
 
-## 近距离结构光补充
+## 历史近距离结构光补充
 
-原始 50 mm 双目基线、128 px 视差搜索会遗漏约 6 cm 的腕部近景。额外的 CPU 离线工具使用同一对原始 IR 和原始标定扩大搜索，经一致性和实际 IR 图像证据筛选后，只补原始 SL 的 NaN。原始有限深度逐位保留，GT 深度不参与重建；原始 `episode.hdf5` 不修改。补充深度仍是稀疏测量，不能把完整的存储或来源核验解释为全图深度精度认证。
+这一节只记录 NSLv2 切换前的历史 SGBM 结果，当前采集和最终统一视频均不使用它。原始 50 mm 双目基线、128 px 视差搜索会遗漏约 6 cm 的腕部近景。额外的 CPU 离线工具使用同一对原始 IR 和原始标定扩大搜索，经一致性和实际 IR 图像证据筛选后，只补原始 SL 的 NaN。原始有限深度逐位保留，GT 深度不参与重建；原始 `episode.hdf5` 不修改。补充深度仍是稀疏测量，不能把完整的存储或来源核验解释为全图深度精度认证。
 
 完整 1228 帧的旁路文件位于 `reproduction/isaac61/outputs/insert-tubes/structured-light-derived/episode.derived-sl.hdf5`，SHA256 为 `a655304f28c3e865bea75830a5c1887bccd79e3bce35ec879ec6b072723b9d0d`。同目录 `visualization/near-range-derived.mp4` 也是完整 25 Hz、49.12 s 的视频，所有 SL 图块明确标为 `near-range derived SL`；RGB、GT、IR 和触觉仍读原始 HDF5。`visualization/near-range-derived.png` 是预先选定的第 296 帧。
 
