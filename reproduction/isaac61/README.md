@@ -33,6 +33,8 @@ evaluation entry `scripts/eval_policy.sh` selects this runtime; an explicit
 
 ## Capture and visualize
 
+For a complete standard three-tube task, use the [insert_tubes guide](../../docs/record/insert-tubes.md). Its controlled expert replay keeps the original tubes and rack, adds no nut/probe fixtures, preserves tube convex collisions, and records zero tactile observations whenever the native tube surface has no contact. Raw rendered gel fields remain available separately.
+
 ```bash
 bash reproduction/isaac61/run.sh collect --task stack_bowls --frames 8 --visualize
 # Validate measured wrist motion while recording every modality:
@@ -107,8 +109,11 @@ body -Y, with compression negative. Optical depth change is a geometry proxy,
 not FEM elastomer deformation; see the HDF5 guide for force axes and units.
 
 TacSL uses NVIDIA's original GelSight R1.5 geometry, calibration, penalty force
-model and Taxim rendering. Contact queries use native PhysX SDF on DirectGPU
+model and Taxim rendering. Contact queries normally use native PhysX SDF on DirectGPU
 scenes, or the declared triangle-mesh backend for particle readback scenes.
+The standard tube expert explicitly selects triangle-mesh distance queries to
+preserve the original convex-decomposition physical colliders. These query
+triangles are distinguished from PhysX cooked collision shapes in provenance.
 Its compliant pads move with each X5 finger. These force values are simulated
 penalty-model estimates. Cloth-only scenes have actual
 tactile camera images but no supported rigid SDF force field; those fields

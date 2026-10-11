@@ -79,7 +79,7 @@ class Env:
             task_env = self
             class Rewards:
                 def init_state(self):
-                    assert task_env.success == [True], "expert must establish episode validity before reward initialization"
+                    assert task_env.success == [True], "episode validity must precede reward initialization"
                 def call_func_parser(self, check, env_idx):
                     return not (mode == "expert_official_failure" and check[0] == "axis_up")
                 def is_A_depth_in_B(self, **kwargs): return ("depth", kwargs)
