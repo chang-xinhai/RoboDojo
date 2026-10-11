@@ -1,7 +1,10 @@
 """Viewer display and HDF5-only export checks on declared CPU fixtures."""
 
+from html.parser import HTMLParser
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -12,6 +15,75 @@ from reproduction.visualize_multimodal import _taxels, letterbox, metric_color, 
 from tests.test_multimodal import fixture
 from utils.multimodal import MultimodalWriter
 from utils.multimodal_hdf5 import HDF5Reader, HDF5Writer
+
+
+class ScriptCollector(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.scripts = []
+        self.inside = False
+        self.buffer = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "script":
+            if dict(attrs).get("src"):
+                raise AssertionError("Standalone viewer must not load external scripts")
+            self.inside, self.buffer = True, []
+
+    def handle_data(self, value):
+        if self.inside:
+            self.buffer.append(value)
+
+    def handle_endtag(self, tag):
+        if tag == "script":
+            self.scripts.append("".join(self.buffer))
+            self.inside = False
+
+
+NODE_VIEWER_CHECK = r"""
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const fs = require('node:fs');
+const scripts = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+const maximumStringLength = require('node:buffer').constants.MAX_STRING_LENGTH;
+const ids = ['slider', 'mode', 'picture', 'counter', 'details', 'play'];
+const elements = Object.fromEntries(ids.map(id => [id, {value: '0'}]));
+let tick, cancelled = false;
+const sandbox = {document: {getElementById: id => elements[id]},
+  setInterval: callback => {tick = callback; return 1},
+  clearInterval: () => {cancelled = true}};
+vm.createContext(sandbox);
+for (const script of scripts) {
+  assert(script.length < maximumStringLength);
+  vm.runInContext(script, sandbox);
+}
+assert.equal(vm.runInContext('frames.length', sandbox), 3);
+assert.equal(elements.slider.max, 2);
+assert.equal(Number(elements.slider.value), 1);
+assert.equal(elements.mode.value, 'rgb');
+assert.equal(JSON.parse(elements.details.textContent).sync.physics_frame, 2);
+assert.equal(elements.picture.src, vm.runInContext('frames[1].views.rgb', sandbox));
+const modes = ['rgb', 'optical_depth_delta', 'normal_force', 'shear_force', 'pad_normal', 'pad_shear'];
+for (const mode of modes) {
+  elements.mode.value = mode;
+  elements.mode.onchange();
+  assert.equal(elements.picture.src, vm.runInContext('frames[1].views[' + JSON.stringify(mode) + ']', sandbox));
+}
+elements.slider.value = '2';
+elements.slider.oninput();
+assert.equal(JSON.parse(elements.details.textContent).sync.physics_frame, 3);
+assert.equal(elements.counter.textContent, '3 / 3');
+elements.play.onclick();
+tick();
+assert.equal(Number(elements.slider.value), 0);
+assert.equal(JSON.parse(elements.details.textContent).sync.physics_frame, 1);
+elements.play.onclick();
+assert.equal(cancelled, true);
+assert.equal(vm.runInContext('typeof alert', sandbox), 'undefined');
+console.log(JSON.stringify({status: 'passed', frames: 3, modes: modes.length, scripts: scripts.length,
+  maximumScriptChars: Math.max(...scripts.map(script => script.length)), maximumStringLength,
+  slider: true, play: true}));
+"""
 
 
 class VisualizationTests(unittest.TestCase):
@@ -62,6 +134,36 @@ class VisualizationTests(unittest.TestCase):
             self.assertNotIn("</script><script>alert", html)
             self.assertIn("\\u003c/script", html)
             self.assertEqual(json.loads((directory / "visualization.json").read_text())["selected_frame"]["index"], 1)
+            parser = ScriptCollector()
+            parser.feed(html)
+            self.assertEqual(len(parser.scripts), 5)  # init + three independent frames + controls
+            self.assertEqual(parser.scripts[0], "const frames=[];")
+            blocks = parser.scripts[1:-1]
+            for index, block in enumerate(blocks):
+                self.assertTrue(block.startswith("frames.push("))
+                self.assertTrue(block.endswith(");"))
+                payload = json.loads(block[len("frames.push(") : -len(");")])
+                self.assertEqual(payload["details"]["sync"]["physics_frame"], index + 1)
+                self.assertEqual(
+                    set(payload["views"]),
+                    {"rgb", "optical_depth_delta", "normal_force", "shear_force", "pad_normal", "pad_shear"},
+                )
+                self.assertEqual(
+                    payload["details"]["vision"]["head"]["provenance"]["untrusted"],
+                    "</script><script>alert(1)</script>",
+                )
+                self.assertLess(len(block), len(html) / 2)
+            self.assertNotIn("const frames=[\n", html)
+            if node := shutil.which("node"):
+                scripts_file = directory / "scripts.json"
+                scripts_file.write_text(json.dumps(parser.scripts))
+                result = subprocess.run(
+                    [node, "-e", NODE_VIEWER_CHECK, str(scripts_file)], capture_output=True, text=True, timeout=30
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                runtime = json.loads(result.stdout)
+                self.assertEqual(runtime["scripts"], 5)
+                self.assertTrue(runtime["slider"] and runtime["play"])
 
     def test_legacy_conversion_preserves_original_runtime_evidence_and_null_forces(self):
         with tempfile.TemporaryDirectory() as directory:

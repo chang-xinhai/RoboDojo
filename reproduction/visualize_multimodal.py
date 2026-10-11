@@ -269,8 +269,8 @@ TacSL optical delta is a signed camera-depth proxy, not FEM deformation.</p>
 <option value="pad_normal">pad outward -Y (compression negative)</option>
 <option value="pad_shear">pad body XZ shear</option></select><span id="counter"></span>
 <p><img id="picture"></p><details><summary>Per-frame calibration and provenance</summary>
-<pre id="details"></pre></details><script>const frames=[\n""")
-            for position, index in enumerate(indices):
+<pre id="details"></pre></details><script>const frames=[];</script>\n""")
+            for index in indices:
                 frame = reader.read_frame(index)
                 picture = mosaic(
                     frame,
@@ -288,10 +288,10 @@ TacSL optical delta is a signed camera-depth proxy, not FEM deformation.</p>
                     best_score = score
                     selected = {"index": index, **frame["sync"], "score": score, "score_semantics": semantics}
                     picture.save(png)
-                if position:
-                    document.write(",\n")
-                # Encode one mode at a time directly to disk; no episode-sized image list.
-                document.write('{"views":{')
+                # Each frame is a separate bounded script. A full-episode JavaScript
+                # string can exceed V8's limit even though Python streams the HTML.
+                # Encode one mode at a time directly to disk, retaining standalone HTML.
+                document.write('<script>frames.push({"views":{')
                 for mode_index, mode in enumerate(MODES):
                     view = (
                         picture
@@ -324,9 +324,11 @@ TacSL optical delta is a signed camera-depth proxy, not FEM deformation.</p>
                     },
                 }
                 # Escape HTML parser termination in metadata strings, including untrusted asset names.
-                document.write('},"details":' + json.dumps(json_value(details)).replace("<", "\\u003c") + "}")
+                document.write(
+                    '},"details":' + json.dumps(json_value(details)).replace("<", "\\u003c") + "});</script>\n"
+                )
             document.write(
-                "];const selectedPreviewIndex="
+                "<script>const selectedPreviewIndex="
                 + str(indices.index(selected["index"]))
                 + ";const initialTactileMode="
                 + json.dumps(tactile)
