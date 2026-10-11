@@ -18,7 +18,7 @@ import pytest
 import torch
 
 from utils.isaaclab_compat import as_torch, set_joint_target
-from utils.live_geometry import get_live_world_transform
+from utils.live_geometry import get_live_world_transform, transform_points_world
 
 ROOT = Path(__file__).resolve().parents[1]
 Q90 = [math.sqrt(0.5), 0, 0, math.sqrt(0.5)]
@@ -46,6 +46,7 @@ def bind_public_methods(owner, filename, classname, names):
         "Usd": Usd,
         "UsdGeom": UsdGeom,
         "get_live_world_transform": get_live_world_transform,
+        "transform_points_world": transform_points_world,
         "omni": SimpleNamespace(
             usd=SimpleNamespace(
                 get_world_transform_matrix=lambda prim: UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(

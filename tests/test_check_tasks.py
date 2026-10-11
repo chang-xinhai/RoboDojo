@@ -18,6 +18,13 @@ FIXTURE_LAYOUT = Path(FIXTURE_DIRECTORY.name) / "stack_bowls_0.json"
 FIXTURE_LAYOUT.write_text(
     json.dumps({"Rigid": {"bowl": [{"category_idx": 10, "default_pos": [i * 0.1, 0, 0.8]} for i in range(3)]}})
 )
+FIXTURE_LOG = Path(FIXTURE_DIRECTORY.name) / "clean-runtime.log"
+FIXTURE_LOG.write_text("[INFO] Native task initialized\n")
+SURFACE_OVERFLOW = (
+    "2026-10-11T04:29:39Z [8,183ms] [Error] [omni.physx.plugin] PhysX error: "
+    "Deformable surface contact buffer overflow detected, please increase "
+    "PxGpuDynamicsMemoryConfig::maxDeformableSurfaceContacts to at least 1048576"
+)
 
 
 def evidence():
@@ -380,6 +387,8 @@ class AcceptanceTests(unittest.TestCase):
             "process_exit_code": 0,
             "real_runtime": True,
             "evidence": evidence(),
+            "log": str(FIXTURE_LOG),
+            "native_log_validation": runner.audit_native_log(FIXTURE_LOG),
         }
         self.assertTrue(runner.can_resume(record, ctx, "stack_bowls", "arx_x5_rgbd"))
         stale = deepcopy(ctx)
@@ -397,6 +406,86 @@ class AcceptanceTests(unittest.TestCase):
         changed_lab = deepcopy(record)
         changed_lab["evidence"]["isaaclab_source_commit"] = "different_lab_pin"
         self.assertFalse(runner.can_resume(changed_lab, ctx, "stack_bowls", "arx_x5_rgbd"))
+
+    def test_exit_zero_and_passed_report_cannot_hide_native_physics_data_loss(self):
+        native_errors = (
+            SURFACE_OVERFLOW,
+            SURFACE_OVERFLOW.replace("[Error]", "[Warning]"),
+            "[Warning] [omni.physx.plugin] PxValidateTriangleMesh for PxDeformableSurface failed, /World/Cloth",
+            "[Error] [omni.physx.plugin] PhysX error: CUDA kernel launch failed",
+            "[Error] [omni.physics.tensors.plugin] Assertion failed: buffer length matches body count",
+            "[Error] [omni.physx.tensors.plugin] Pattern '/World/Cloth' did not match any surface deformable bodies",
+        )
+        actual_execute = runner.execute_process
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = SimpleNamespace(output_dir=root, env_cfg="arx_x5_rgbd", environment=root, timeout=3)
+            for native_line in native_errors:
+                with self.subTest(native_line=native_line):
+                    # This stand-in exits zero and creates a fresh valid report.
+                    # It proves subprocess acceptance behavior, not Isaac physics.
+                    def execute_standin(command, log, timeout, **kwargs):
+                        code = (
+                            "import pathlib,sys; print(sys.argv[1],flush=True); "
+                            "pathlib.Path(sys.argv[2]).write_text(sys.argv[3])"
+                        )
+                        return actual_execute(
+                            [
+                                sys.executable,
+                                "-c",
+                                code,
+                                native_line,
+                                str(root / "stack_bowls.json"),
+                                json.dumps(evidence()),
+                            ],
+                            log,
+                            timeout,
+                        )
+
+                    with patch.object(runner, "execute_process", side_effect=execute_standin):
+                        record = runner.run_task("stack_bowls", args, context())
+                    self.assertEqual(record["process_exit_code"], 0)
+                    self.assertEqual(record["evidence"]["status"], "passed")
+                    self.assertEqual(record["status"], "failed")
+                    self.assertIn("Native physics failure", record["error"])
+                    self.assertEqual(record["native_log_validation"]["known_fatal_count"], 1)
+                    self.assertFalse(runner.can_resume(record, context(), "stack_bowls", "arx_x5_rgbd"))
+
+    def test_supported_collision_fallback_and_unrelated_renderer_errors_are_not_native_fatal(self):
+        lines = (
+            "[Warning] [omni.physx.plugin] GPU convex cooking failed; using CPU collision fallback",
+            "[Error] [omni.hydra.rtx] Cannot create smooth normal adjacency buffer for /World/Cloth",
+            "RuntimeWarning: overflow encountered in reduce",
+            "[INFO] [omni.physx.plugin] PxGpuDynamicsMemoryConfig::maxDeformableSurfaceContacts = 1048576",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "ordinary-warnings.log"
+            log.write_text("\n".join(lines))
+            audit = runner.audit_native_log(log)
+            self.assertEqual(audit["known_fatal_count"], 0)
+            self.assertEqual(audit["sha256"], hashlib.sha256(log.read_bytes()).hexdigest())
+
+    def test_resume_requires_unchanged_real_log_with_current_native_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "runtime.log"
+            log.write_text("[INFO] Scene initialized\n")
+            record = {
+                "status": "passed",
+                "context": context(),
+                "process_exit_code": 0,
+                "real_runtime": True,
+                "evidence": evidence(),
+                "log": str(log),
+                "native_log_validation": runner.audit_native_log(log),
+            }
+            self.assertTrue(runner.can_resume(record, context(), "stack_bowls", "arx_x5_rgbd"))
+            log.write_text(log.read_text() + SURFACE_OVERFLOW + "\n")
+            self.assertFalse(runner.can_resume(record, context(), "stack_bowls", "arx_x5_rgbd"))
+            # A recomputed hash still cannot certify a known fatal native error.
+            record["native_log_validation"] = runner.audit_native_log(log)
+            self.assertFalse(runner.can_resume(record, context(), "stack_bowls", "arx_x5_rgbd"))
+            log.unlink()
+            self.assertFalse(runner.can_resume(record, context(), "stack_bowls", "arx_x5_rgbd"))
 
     def test_zero_exit_without_fresh_output_cannot_reuse_stale_pass(self):
         with tempfile.TemporaryDirectory() as directory:

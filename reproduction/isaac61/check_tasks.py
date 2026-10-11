@@ -19,12 +19,19 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = "robodojo.task-scene-smoke.v4"
+NATIVE_LOG_POLICY = "physx-known-fatal.v1"
+PHYSICS_LOG_LINE = re.compile(
+    r"\[(?P<level>Error|Fatal|Critical|Warning)\]\s+"
+    r"\[(?P<module>omni\.(?:physx|physics)(?:\.[^\]]+)?)\]\s+(?P<message>.*)",
+    re.IGNORECASE,
+)
 CAMERAS = {"head", "left_wrist", "right_wrist"}
 REQUIRED_CHECKS = {
     "task scene initialization",
@@ -336,6 +343,48 @@ def check_evidence(evidence, task, env_cfg):
     return evidence
 
 
+def known_native_error(line):
+    """Identify physics data loss or invalid native bodies, including warnings.
+
+    Renderer normal-adjacency errors and supported CPU collision fallback
+    warnings belong to separate diagnostics, not this physics deny policy.
+    """
+    match = PHYSICS_LOG_LINE.search(line)
+    if match is None:
+        return None
+    level, message = match["level"].lower(), match["message"].lower()
+    if "buffer overflow" in message or "capacity exceeded" in message or "contacts dropped" in message:
+        return "physics_capacity_or_data_loss"
+    if "pxvalidatetrianglemesh for pxdeformablesurface failed" in message:
+        return "invalid_surface_mesh"
+    if level in {"error", "fatal", "critical"}:
+        if "physx error:" in message:
+            return "physx_error"
+        if "assertion failed" in message or "assertion failure" in message or "assert failed" in message:
+            return "native_assertion"
+        if "did not match any" in message and any(
+            kind in message for kind in ("deformable bod", "rigid bod", "articulation", "particle")
+        ):
+            return "missing_native_body"
+    return None
+
+
+def audit_native_log(path):
+    """Bind acceptance to the real process log and retain fatal line evidence."""
+    raw = Path(path).read_bytes()
+    errors = []
+    for number, line in enumerate(raw.decode("utf-8", errors="replace").splitlines(), 1):
+        kind = known_native_error(line)
+        if kind:
+            errors.append({"line_number": number, "kind": kind, "message": line})
+    return {
+        "policy": NATIVE_LOG_POLICY,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "known_fatal_count": len(errors),
+        "errors": errors,
+    }
+
+
 def can_resume(record, context, task, env_cfg):
     if not record or record.get("status") != "passed" or record.get("context") != context:
         return False
@@ -343,6 +392,9 @@ def can_resume(record, context, task, env_cfg):
         return False
     try:
         check_evidence(record.get("evidence", {}), task, env_cfg)
+        audit = audit_native_log(record.get("log", ""))
+        if audit["known_fatal_count"] or record.get("native_log_validation") != audit:
+            return False
     except (OSError, ValueError, TypeError, AttributeError):
         return False
     return (
@@ -421,6 +473,12 @@ def run_task(task, args, context):
                 context["packages"].get(name) != version for name, version in record["evidence"]["packages"].items()
             ):
                 raise ValueError("Task used different runtime package versions")
+            record["native_log_validation"] = audit_native_log(log)
+            if record["native_log_validation"]["known_fatal_count"]:
+                first = record["native_log_validation"]["errors"][0]
+                raise ValueError(
+                    f"Native physics failure in process log at line {first['line_number']}: {first['message']}"
+                )
             record["status"] = "passed"
         except (OSError, ValueError, TypeError, AttributeError) as exc:
             record["error"] = f"Missing or invalid fresh runtime evidence: {exc}"
@@ -477,7 +535,10 @@ def main():
         "context": context,
         "selected_tasks": selected,
         "tasks": [],
-        "acceptance": "real scene initialization, reset, physics steps and all three RGBD camera captures",
+        "acceptance": (
+            "real scene initialization, reset, physics steps, all three RGBD camera captures, "
+            "task instructions, reward predicates and no known fatal native physics log signals"
+        ),
         "policy_evaluation": False,
         "status": "running",
     }
