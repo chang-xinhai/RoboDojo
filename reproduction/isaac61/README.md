@@ -41,8 +41,10 @@ bash reproduction/isaac61/run.sh collect --task stack_bowls --motion-demo --fram
 
 The default output is `reproduction/isaac61/outputs/multimodal-capture`. Choose
 a new `--output` directory for each recording; existing frames are never
-overwritten. `index.html` provides a local frame slider; PNG and MP4 previews
-are generated from the saved, lossless NPZ frames. Rebuild them with:
+overwritten. `multimodal.html` provides a local frame slider; `multimodal.png`
+and `multimodal.mp4` are generated from the saved, lossless `frame_*.npz` files.
+`manifest.json` describes the recording and `validation.json` confirms the
+completed runtime checks. Rebuild the previews with:
 
 ```bash
 bash reproduction/isaac61/run.sh visualize reproduction/isaac61/outputs/multimodal-capture
@@ -51,10 +53,12 @@ bash reproduction/isaac61/run.sh visualize reproduction/isaac61/outputs/multimod
 | Location | Recorded fields |
 | --- | --- |
 | `head`, `left_wrist`, `right_wrist` | `rgb`, `depth_gt`, `depth_sl`, `ir_left`, `ir_right`, intrinsics and world camera poses |
-| `left` and `right`, fingers `0` and `1` | official TacSL `rgb`, absolute camera `depth`, SDF indentation, normal and shear forces, calibration and provenance |
+| `left` and `right`, fingers `0` and `1` | official TacSL `rgb`, absolute camera `depth`, `penetration_depth`, normal and shear forces, taxel world positions, units and provenance |
 
-`depth_gt` is renderer ground-truth distance; `depth_sl` is independently
-reconstructed from projected-pattern stereo matching. Both are float32 metres.
+`depth_gt` is renderer ground-truth optical-axis depth in the RGB camera frame;
+`depth_sl` is independently reconstructed from projected-pattern stereo matching
+in the left IR optical frame. Both are float32 metres; compare them only after
+transforming between their calibrated frames.
 Invalid stereo depth is NaN. IR is an active projected-light simulation obtained
 from linear HDR projector-on/off subtraction; it does not model the complete
 spectral response of a physical near-infrared sensor. RGB is rendered with
@@ -67,9 +71,11 @@ motion, bounded by its soft joint limits. Saved frames include actuator targets
 and independently measured joint positions; the run fails if either wrist does
 not measurably move. The default amplitude is 0.03 radians at 0.5 Hz.
 
-TacSL uses NVIDIA's original GelSight R1.5 geometry, calibration, SDF forces
-and Taxim rendering. Its compliant pads move with each X5 finger. These force
-values are simulated penalty-model estimates. Cloth-only scenes have actual
+TacSL uses NVIDIA's original GelSight R1.5 geometry, calibration, penalty force
+model and Taxim rendering. Contact queries use native PhysX SDF on DirectGPU
+scenes, or the declared triangle-mesh backend for particle readback scenes.
+Its compliant pads move with each X5 finger. These force values are simulated
+penalty-model estimates. Cloth-only scenes have actual
 tactile camera images but no supported rigid SDF force field; those fields
 are explicitly null with a reason. See [TacSL details](TACSL.md).
 
@@ -93,7 +99,7 @@ bash reproduction/isaac61/run.sh python reproduction/isaac61/check_tasks.py
 
 The task suite starts one fresh process for each runnable task, initializes and
 resets its scene, steps physics and validates all three RGBD cameras. It does
-not measure policy success. `--tasks stack_bowls fold_cloth` selects a subset;
+not measure policy success. `--tasks stack_bowls fold_clothes` selects a subset;
 `--resume` accepts prior evidence only for matching source contents, runtime
 and configuration. JSON reports, NPZ arrays, galleries and detailed logs are
 saved for reviewing actual runtime results. A failed GPU assertion exits
@@ -119,9 +125,8 @@ mass/friction settings, scale and visual configuration, so a changed physical
 configuration selects its own native body. Decreasing the active count parks
 unused cached bodies; an unprepared asset variant or increased cached quantity
 requires a fresh TaskEnv and fails before metadata is changed.
-Captures reject nonfinite
-state, objects more than 100 m from their environment origin, or centers more
-than 5 m from the saved placement.
+Captures reject nonfinite state, objects more than 100 m from their environment
+origin, or centers more than 5 m from the saved placement.
 
 Rigid bodies reset linear and angular velocity together through the native
 six-component tensor API; articulated objects also clear joint velocities.
