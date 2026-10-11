@@ -21,8 +21,8 @@ import torch
 import warp as wp
 
 from .camera_boundary import TacSLCameraBoundary, cleanup_camera_once
+from .contact_query import create_contact_query_view, find_warp_contact_components, validate_query_backend
 from .sdf_boundary import BodyFrameSdfView, shape_pose_in_body
-from .triangle_mesh_sdf import WarpTriangleMeshSdfView
 
 
 class SingleEnvironmentSensorBase(SensorBase):
@@ -106,6 +106,10 @@ class SingleEnvironmentCamera(Camera, SingleEnvironmentSensorBase):
 class RoboDojoTacSLSensor(TacSLCameraBoundary, VisuoTactileSensor, SingleEnvironmentSensorBase):
     """Official TacSL equations with exact per-environment PhysX view paths."""
 
+    def __init__(self, cfg, *, contact_query_backend="auto"):
+        self._requested_contact_query_backend = validate_query_backend(contact_query_backend)
+        super().__init__(cfg)
+
     def _initialize_camera_tactile(self):
         cfg = self.cfg.camera_cfg
         if cfg is None:
@@ -135,22 +139,19 @@ class RoboDojoTacSLSensor(TacSLCameraBoundary, VisuoTactileSensor, SingleEnviron
         self._elastomer_com_b = wp.to_torch(self._elastomer_body_view.get_coms()).to(self._device)[..., :3]
         if self.cfg.contact_object_prim_path_expr is None:
             return
-        mesh, body = self._find_contact_object_components()
-        from utils.particle_readback_bridge import ReadbackTensorView
-
-        if isinstance(self._physics_sim_view, ReadbackTensorView):
-            self._contact_object_sdf_view = WarpTriangleMeshSdfView.from_usd(mesh, self._device)
-            self.contact_query_backend = WarpTriangleMeshSdfView.query_backend
-            self.contact_query_metadata = {
-                "triangle_count": self._contact_object_sdf_view.triangle_count,
-                "discarded_degenerate_triangles": self._contact_object_sdf_view.discarded_degenerate_triangles,
-            }
+        if self._requested_contact_query_backend == "warp_triangle_mesh":
+            mesh, body = find_warp_contact_components(self.stage, self.cfg.contact_object_prim_path_expr)
         else:
-            self._contact_object_sdf_view = self._physics_sim_view.create_sdf_shape_view(
-                str(mesh.GetPath()), self.cfg.tactile_array_size[0] * self.cfg.tactile_array_size[1]
+            mesh, body = self._find_contact_object_components()
+        self._contact_object_sdf_view, self.contact_query_backend, self.contact_query_metadata = (
+            create_contact_query_view(
+                self._physics_sim_view,
+                mesh,
+                self.cfg.tactile_array_size[0] * self.cfg.tactile_array_size[1],
+                self._device,
+                self._requested_contact_query_backend,
             )
-            self.contact_query_backend = "physx_native_sdf"
-            self.contact_query_metadata = {}
+        )
         self._contact_object_body_view = self._physics_sim_view.create_rigid_body_view([str(body.GetPath())])
         if self._contact_object_sdf_view.count != 1 or self._contact_object_body_view.count != 1:
             raise RuntimeError(

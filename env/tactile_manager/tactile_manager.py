@@ -7,6 +7,8 @@ All configured rigid task objects participate through independent official SDF v
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+import math
 from pathlib import Path
 
 from .contact_paths import contact_path_for_env
@@ -16,6 +18,31 @@ class TactileManager:
     def __init__(self, num_envs, config, robot_manager, device):
         self.num_envs = num_envs
         self.config = config or {}
+        labels = self.config.get("contact_object_labels")
+        if labels is not None and (
+            not isinstance(labels, Sequence)
+            or isinstance(labels, str)
+            or not labels
+            or any(not isinstance(label, str) or not label for label in labels)
+            or len(set(labels)) != len(labels)
+        ):
+            raise ValueError("TacSL contact_object_labels must be a nonempty list of unique task labels")
+        if labels is not None and self.config.get("contact_object_paths"):
+            raise ValueError("Use task contact_object_labels or explicit contact_object_paths, not both")
+        if self.config.get("contact_conditioned_observations") and labels is None:
+            raise ValueError("Contact-conditioned tactile observations require explicit native task contact labels")
+        mount = self.config.get("mount_position_link", (0.035, 0.024, -0.06776))
+        if not isinstance(mount, Sequence) or isinstance(mount, str) or len(mount) != 3:
+            raise ValueError(
+                "TacSL mount_position_link must contain [forward_x, absolute_inward_y, origin_z] in metres"
+            )
+        self.mount_position_link = tuple(float(value) for value in mount)
+        if not all(math.isfinite(value) for value in self.mount_position_link) or self.mount_position_link[1] < 0:
+            raise ValueError("TacSL mount_position_link must be finite with a nonnegative absolute inward Y offset")
+        # Lazy import avoids bringing Warp/Kit into normal disabled-manager construction.
+        self.contact_query_backend = self.config.get("contact_query_backend", "auto")
+        if self.contact_query_backend not in ("auto", "physx_native_sdf", "warp_triangle_mesh"):
+            raise ValueError(f"Unsupported TacSL contact_query_backend: {self.contact_query_backend!r}")
         self.enabled = bool(self.config.get("enabled", False))
         self.robot_manager = robot_manager
         self.device = str(device)
@@ -62,8 +89,7 @@ class TactileManager:
         self.contact_paths = [path for paths in self.contact_paths_by_env for path in paths]
         self.force_field_available = any(self.contact_paths_by_env)
         self.synchronize_contact_objects()
-        for path in self.contact_paths:
-            self._prepare_sdf(path)
+        self._prepare_contact_collisions()
         targets = [r for r in self.robot_manager.robot_list if getattr(r, "type", "target") == "target"]
         if len(targets) != 2:
             raise ValueError(f"Bimanual tactile collection requires two target arms, found {len(targets)}.")
@@ -91,8 +117,27 @@ class TactileManager:
 
         objects = dict(scene_manager._rigid_and_dynamic_objects[env_index])
         objects.update(scene_manager._articulation_objects[env_index])
-        roots = [obj.prim_path for obj in objects.values()]
         calibration_objects = getattr(scene_manager, "_tactile_calibration_objects", None)
+        labels = self.config.get("contact_object_labels")
+        if labels is not None:
+            if calibration_objects is not None and calibration_objects[env_index]:
+                raise ValueError("Native task contact labels forbid tactile calibration/probe objects")
+            paths = []
+            for label in labels:
+                instance_name = scene_manager.layout_manager.get_instance_name(env_index, label=label)
+                if instance_name is None or instance_name not in objects:
+                    raise ValueError(
+                        f"Missing native TacSL contact label {label} in env_{env_index}; "
+                        f"resolved instance={instance_name!r}"
+                    )
+                matches = self._contact_meshes([objects[instance_name].prim_path])
+                if not matches:
+                    raise ValueError(
+                        f"Native TacSL contact label {label} in env_{env_index} has no actual rigid mesh colliders"
+                    )
+                paths.extend(matches)
+            return paths
+        roots = [obj.prim_path for obj in objects.values()]
         if calibration_objects is not None:
             roots.extend(obj.prim_path for obj in calibration_objects[env_index].values())
         return self._contact_meshes(roots)
@@ -157,6 +202,12 @@ class TactileManager:
                 sdf = PhysxSchema.PhysxSDFMeshCollisionAPI.Apply(mesh)
                 sdf.CreateSdfResolutionAttr(int(self.config.get("sdf_resolution", 128)))
 
+    def _prepare_contact_collisions(self):
+        """Explicit triangle queries retain the task asset's original cooking."""
+        if self.contact_query_backend != "warp_triangle_mesh":
+            for path in self.contact_paths:
+                self._prepare_sdf(path)
+
     def _mount(self, robot_path, finger, link_name, sign, asset):
         from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
@@ -172,7 +223,7 @@ class TactileManager:
                 raise RuntimeError(f"Incomplete official TacSL sensor asset: {sensor_path}/{relative}")
         # R1.5 gel faces -Y in its native frame. ARX link7 faces -Y,
         # link8 faces +Y. The gel is centred over the opposing jaw face.
-        position = Gf.Vec3d(0.035, sign * 0.024, -0.06776)
+        position = Gf.Vec3d(self._mount_translation(sign))
         rotation = Gf.Rotation(Gf.Vec3d(0, 0, 1), 180 if sign > 0 else 0)
         mount_matrix = Gf.Matrix4d(1).SetRotate(rotation)
         mount_matrix.SetTranslateOnly(position)
@@ -222,6 +273,13 @@ class TactileManager:
         # unchanged; this near plane is specific to the validated X5 mount.
         camera.CreateClippingRangeAttr(Gf.Vec2f(0.0173, 0.0186))
 
+    def _mount_translation(self, sign):
+        """Actual fixed-joint/asset translation, applying the jaw's inward sign."""
+        if sign not in (-1, 1):
+            raise ValueError("TacSL mount requires a finger sign of -1 or +1")
+        x, inward_y, z = self.mount_position_link
+        return x, sign * inward_y, z
+
     def _create_sensors(self, base, contact_paths):
         from isaaclab.sensors import CameraCfg
         import isaaclab.sim as sim_utils
@@ -267,7 +325,7 @@ class TactileManager:
                 tangential_stiffness=float(self.config.get("tangential_stiffness", 0.1)),
                 friction_coefficient=float(self.config.get("friction", 0.8)),
             )
-            result.append(RoboDojoTacSLSensor(cfg))
+            result.append(RoboDojoTacSLSensor(cfg, contact_query_backend=self.contact_query_backend))
         return result
 
     def _sensor_groups(self):
@@ -331,6 +389,7 @@ class TactileManager:
 
         from utils.isaaclab_compat import as_torch, simulation_snapshot
 
+        from .contact_observation import condition_contact_observation
         from .force_projection import project_force_to_pad
 
         self.synchronize_contact_objects()
@@ -364,11 +423,24 @@ class TactileManager:
                         body_force, pad_normal, pad_shear = project_force_to_pad(
                             normal, shear, taxel_quat, gel_pose[3:]
                         )
+                    optical = {
+                        "rgb": primary.tactile_rgb_image[0].to(torch.uint8).clone(),
+                        "depth": primary.tactile_depth_image[0].clone(),
+                        "optical_depth_delta": (baseline_depth - primary.tactile_depth_image[0]).clone(),
+                    }
+                    conditioned = bool(self.config.get("contact_conditioned_observations", False))
+                    if conditioned:
+                        optical = condition_contact_observation(
+                            optical["rgb"],
+                            optical["depth"],
+                            optical["optical_depth_delta"],
+                            penetration,
+                            normal,
+                            shear,
+                        )
                     samples.append(
                         {
-                            "rgb": primary.tactile_rgb_image[0].to(torch.uint8).clone(),
-                            "depth": primary.tactile_depth_image[0].clone(),
-                            "optical_depth_delta": (baseline_depth - primary.tactile_depth_image[0]).clone(),
+                            **optical,
                             "normal_force": normal,
                             "shear_force": shear,
                             "penetration_depth": penetration,
@@ -386,7 +458,17 @@ class TactileManager:
                                 "contact_query_metadata": [sensor.contact_query_metadata for sensor in sensors]
                                 if available
                                 else [],
-                                "force_contact_scope": "registered_rigid_mesh_colliders" if available else None,
+                                "force_contact_scope": (
+                                    "selected_native_task_labels"
+                                    if self.config.get("contact_object_labels")
+                                    else "registered_rigid_mesh_colliders"
+                                )
+                                if available
+                                else None,
+                                "contact_conditioned_observations": conditioned,
+                                "contact_active_source": "any actual registered native task taxel SDF penetration > 0"
+                                if conditioned
+                                else None,
                                 "force_field_available": available,
                                 "force_unavailable_reason": None
                                 if available
@@ -421,11 +503,25 @@ class TactileManager:
                                 "taxel_array_axes": ["sensor_local_x", "sensor_local_z"],
                                 "taxel_flatten_order": "C: x outer, z inner",
                                 "contact_object_paths": list(self.contact_paths_by_env[env_index]),
+                                "contact_object_labels": list(self.config.get("contact_object_labels", [])),
+                                "mount_position_link_config_m": list(self.mount_position_link),
+                                "mount_translation_link_m": list(
+                                    self._mount_translation(-1 if finger == "finger_0" else 1)
+                                ),
+                                "mount_rotation_link_xyzw": [0.0, 0.0, 0.0, 1.0]
+                                if finger == "finger_0"
+                                else [0.0, 0.0, 1.0, 0.0],
+                                "mount_pose_source": "configured actual USD asset and fixed-joint transform relative to X5 jaw; no runtime pose override",
+                                "optical_contact_conditioning": "rgb/depth/optical_depth_delta are actual optical samples when contact_active; otherwise exact zero sentinels; raw_optical_* preserve unmodified samples"
+                                if conditioned
+                                else None,
+                                "raw_optical_depth_units": "m",
+                                "raw_optical_depth_semantics": "unmodified distance_to_image_plane",
                             },
                         }
                     )
                 result = {"timestamp_ns": timestamp_ns, "physics_frame": frame}
-                for field in (
+                fields = (
                     "rgb",
                     "depth",
                     "optical_depth_delta",
@@ -438,7 +534,10 @@ class TactileManager:
                     "pad_shear_force_xz",
                     "taxel_orientation_w_xyzw",
                     "gel_pose_w_xyzw",
-                ):
+                )
+                if self.config.get("contact_conditioned_observations"):
+                    fields += ("raw_optical_rgb", "raw_optical_depth", "raw_optical_depth_delta", "contact_active")
+                for field in fields:
                     values = [sample[field] for sample in samples]
                     result[field] = (
                         torch.stack(values)
