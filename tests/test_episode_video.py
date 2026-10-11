@@ -10,13 +10,108 @@ import unittest
 
 import numpy as np
 
-from reproduction.export_episode_video import export_episode_video, rgb_preview
+from reproduction.export_episode_video import export_episode_video, rgb_preview, unified_preview
+from reproduction.visualize_multimodal import metric_color
 from tests.test_contact_conditioned_recording import contact_fixture
 from utils.multimodal_hdf5 import HDF5Writer
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "CPU video encoding/decoding tools required")
 class EpisodeVideoTests(unittest.TestCase):
+    def test_unified_video_keeps_every_camera_modality_and_live_gel_synchronized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            expected = []
+            with HDF5Writer(
+                directory / "source", {"synthetic_cpu_fixture": True, "nslv2": {"synthetic_cpu_fixture": True}}
+            ) as writer:
+                for index in range(3):
+                    frame = contact_fixture(index == 1, index + 1)
+                    row_colors = []
+                    for row, camera in enumerate(frame["vision"].values()):
+                        camera["provenance"]["depth_sl_method"] = "nsl_v2"
+                        camera["rgb"][:] = (50 + index * 25, 80 + row * 30, 110)
+                        camera["depth_gt"][:] = 0.2 + row * 0.6
+                        camera["ir_left"][:] = 30 + row * 40 + index * 10
+                        camera["ir_right"][:] = 80 + row * 40 + index * 10
+                        camera["depth_sl"][:] = 0.3 + row * 0.6
+                        camera["depth_sl"][:, :2] = np.nan
+                        row_colors.append(
+                            [
+                                camera["rgb"][0, 0],
+                                metric_color(np.full((2, 2), camera["depth_gt"][0, 0]), 0.03, 3.0)[0, 0],
+                                np.repeat(camera["ir_left"][0, 0], 3),
+                                np.repeat(camera["ir_right"][0, 0], 3),
+                                metric_color(np.full((2, 2), camera["depth_sl"][0, -1]), 0.03, 3.0)[0, 0],
+                            ]
+                        )
+                    gel_color = (75 + index * 35, 135, 180)
+                    for fingers in frame["tactile"].values():
+                        for data in fingers.values():
+                            data["raw_optical_rgb"][:] = gel_color
+                            if index == 1:
+                                data["rgb"] = data["raw_optical_rgb"].copy()
+                    writer.append(frame)
+                    expected.append((row_colors, gel_color))
+            original_sha = hashlib.sha256(writer.path.read_bytes()).hexdigest()
+            video = directory / "unified.mp4"
+            report = export_episode_video(writer.path, video, width=1000, layout="unified", require_nslv2=True)
+            self.assertEqual(report["decoded_frames"], 3)
+            self.assertEqual(report["video_fps"], 25)
+            self.assertEqual(len(report["views"]), 19)
+            self.assertEqual(report["tactile_rgb_field"], "raw_optical_rgb")
+            self.assertEqual(report["depth_display_range_m"], [0.03, 3.0])
+            self.assertTrue(report["nslv2_required_and_verified_every_frame"])
+            self.assertEqual(report["structured_light_source"], {"synthetic_cpu_fixture": True})
+            decoded = subprocess.check_output(
+                ["ffmpeg", "-v", "error", "-i", str(video), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+            )
+            images = np.frombuffer(decoded, np.uint8).reshape(3, report["height"], report["width"], 3)
+            for index, (colors, gel_color) in enumerate(expected):
+                for row, modalities in enumerate(colors):
+                    y = 100 + row * 210 + 36 + 75
+                    for col, color in enumerate(modalities):
+                        self.assertLess(
+                            np.abs(images[index, y, col * 200 + (150 if col == 4 else 100)].astype(int) - color).max(),
+                            # The tiny SL fixture has a hard NaN/valid color edge;
+                            # aspect-preserving resizing and lossy H.264 can ring.
+                            12 if col == 4 else 8,
+                        )
+                    # SL invalid pixels remain visibly invalid; GT is never copied into SL.
+                    self.assertLess(np.abs(images[index, y, 850].astype(int) - (130, 0, 130)).max(), 8)
+                for pad in range(4):
+                    self.assertLess(
+                        np.abs(images[index, 746 + 36 + 100, pad * 250 + 125].astype(int) - gel_color).max(), 8
+                    )
+            self.assertEqual(hashlib.sha256(writer.path.read_bytes()).hexdigest(), original_sha)
+
+    def test_unified_preview_rejects_invalid_geometry_range_and_missing_live_gel(self):
+        frame = contact_fixture(False)
+        for kwargs in ({"width": 990}, {"depth_range": (1, 1)}, {"depth_range": (0, np.inf)}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                unified_preview(frame, 0, 2, frame["sync"]["timestamp_ns"], **kwargs)
+        del frame["tactile"]["right"]["finger_1"]["raw_optical_rgb"]
+        with self.assertRaisesRegex(ValueError, "recorded raw_optical_rgb"):
+            unified_preview(frame, 0, 2, frame["sync"]["timestamp_ns"])
+
+    def test_required_nslv2_rejects_mixed_camera_methods_without_publishing_partial_video(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            with HDF5Writer(directory / "source", {"synthetic_cpu_fixture": True}) as writer:
+                for index in range(3):
+                    frame = contact_fixture(False, index + 1)
+                    for camera in frame["vision"].values():
+                        camera["provenance"]["depth_sl_method"] = "nsl_v2"
+                    if index == 1:
+                        frame["vision"]["right_wrist"]["provenance"]["depth_sl_method"] = "synthetic_other_backend"
+                    writer.append(frame)
+            video = directory / "unified.mp4"
+            with self.assertRaisesRegex(ValueError, "NSLv2 depth required.*frame 1"):
+                export_episode_video(writer.path, video, width=1000, layout="unified", require_nslv2=True)
+            self.assertFalse(video.exists())
+            self.assertFalse(video.with_suffix(".json").exists())
+            self.assertFalse(video.with_name("unified.partial.mp4").exists())
+
     def test_continuous_gel_survives_idle_contact_and_release_without_mutating_source(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)

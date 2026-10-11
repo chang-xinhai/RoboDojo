@@ -22,11 +22,13 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from reproduction.visualize_multimodal import metric_color
 from utils.multimodal import SCHEMA_VERSION
 from utils.multimodal_hdf5 import HDF5Reader
 from utils.save_file import VideoStreamWriter
 
 PADS = tuple((side, finger) for side in ("left", "right") for finger in ("finger_0", "finger_1"))
+VISION_FIELDS = ("rgb", "depth_gt", "ir_left", "ir_right", "depth_sl")
 
 
 @lru_cache(maxsize=32)
@@ -137,6 +139,92 @@ def rgb_preview(frame, index, count, initial_timestamp_ns, *, width=1200, tactil
     return canvas
 
 
+def unified_preview(frame, index, count, initial_timestamp_ns, *, width=1920, depth_range=(0.03, 3.0)):
+    """Synchronized camera rows, modality columns and four continuous gel panels."""
+    if width < 1000 or width % 20:
+        raise ValueError("Unified video width must be at least 1000 and divisible by 20")
+    low, high = depth_range
+    if not np.isfinite((low, high)).all() or not 0 <= low < high:
+        raise ValueError("Depth display range must be finite and increasing")
+    header, label_h, scale_h, gap, footer_h = 100, 36, 24, 16, 40
+    cam_w = width // 5
+    image_h = cam_w * 3 // 4
+    row_h = label_h + image_h + scale_h
+    tactile_y = header + 3 * row_h + gap
+    height = tactile_y + label_h + cam_w + footer_h
+    height += height % 2
+    canvas = Image.new("RGB", (width, height), "#101827")
+    draw = ImageDraw.Draw(canvas)
+    size = max(12, round(20 * width / 1920))
+
+    def text(x, y, value, max_w, color="white", preferred=None):
+        draw.text((x, y), value, font=_fit_font(draw, value, max_w, preferred or size), fill=color)
+
+    stamp = frame["sync"]["timestamp_ns"]
+    text(12, 8, "INSERT TUBES | ALL MODALITIES", width - 24, preferred=size + 6)
+    text(
+        12,
+        42,
+        f"Frame {index + 1}/{count} | physics {frame['sync']['physics_frame']} | "
+        f"sim {stamp / 1e9:.3f}s | elapsed {(stamp - initial_timestamp_ns) / 1e9:.3f}s",
+        width - 24,
+        "#bcd7e8",
+    )
+    nslv2 = all(camera.get("provenance", {}).get("depth_sl_method") == "nsl_v2" for camera in frame["vision"].values())
+    sl_label = "SL: NSLv2 prediction" if nslv2 else "SL: recorded input"
+    text(
+        12,
+        72,
+        f"Depth: fixed {low:g} - {high:g} m (clipped) | purple = invalid | original IR | {sl_label} | live tactile",
+        width - 24,
+        "#bcd7e8",
+        preferred=max(12, size - 2),
+    )
+
+    def image(array, x, y, w, h):
+        content = Image.new("RGB", (w, h), "#050a13")
+        contained = ImageOps.contain(Image.fromarray(np.asarray(array, dtype=np.uint8)).convert("RGB"), (w, h))
+        content.paste(contained, ((w - contained.width) // 2, (h - contained.height) // 2))
+        canvas.paste(content, (x, y))
+
+    labels = ("RGB", "Depth GT (RGB)", "IR left", "IR right", "NSLv2 depth (IR)" if nslv2 else "SL depth (left IR)")
+    for row, name in enumerate(("head", "left_wrist", "right_wrist")):
+        camera = frame["vision"][name]
+        for col, (field, label) in enumerate(zip(VISION_FIELDS, labels)):
+            x, y = col * cam_w, header + row * row_h
+            draw.rectangle((x, y, x + cam_w - 1, y + label_h - 1), fill="#192a3a")
+            text(x + 8, y + 7, f"{name.replace('_', ' ').upper()} | {label}", cam_w - 16)
+            if field.startswith("depth"):
+                array = metric_color(camera[field], low, high)
+            elif field.startswith("ir"):
+                array = np.repeat(np.asarray(camera[field])[..., None], 3, axis=-1)
+            else:
+                array = camera[field]
+            image(array, x, y + label_h, cam_w, image_h)
+            if field.startswith("depth"):
+                bar = metric_color(np.linspace(low, high, cam_w)[None, :].repeat(3, axis=0), low, high)
+                canvas.paste(Image.fromarray(bar), (x, y + label_h + image_h + 3))
+                text(x + 8, y + label_h + image_h + 6, f"{low:g} m", cam_w // 2, preferred=12)
+                text(x + cam_w - 65, y + label_h + image_h + 6, f"{high:g} m", 60, preferred=12)
+    for col, (side, finger) in enumerate(PADS):
+        data = frame["tactile"][side][finger]
+        if "raw_optical_rgb" not in data:
+            raise ValueError(f"Continuous tactile display requires recorded raw_optical_rgb: {side}.{finger}")
+        x, w = col * width // 4, width // 4
+        conditioned = data.get("provenance", {}).get("contact_conditioned_observations") is True
+        state = ("CONTACT" if bool(data["contact_active"]) else "NO CONTACT") if conditioned else "CONTACT UNSPECIFIED"
+        text(x + 8, tactile_y + 7, f"{side.upper()} / {finger.replace('_', ' ')} | {state}", w - 16)
+        image(data["raw_optical_rgb"][..., :3], x, tactile_y + label_h, w, cam_w)
+        normal = np.asarray(data["normal_force"], dtype=np.float64)
+        shear = np.asarray(data["shear_force"], dtype=np.float64)
+        peak = float(np.sqrt(normal**2 + (shear**2).sum(axis=-1)).max())
+        penetration = float(np.asarray(data["penetration_depth"]).max()) * 1000
+        text(
+            x + 8, tactile_y + label_h + cam_w + 9, f"Fpeak {peak:.4f} N | pen {penetration:.3f} mm", w - 16, "#bcd7e8"
+        )
+    return canvas
+
+
 def _timeline(reader):
     if len(reader) < 2:
         raise ValueError("At least two committed frames are needed to derive the actual video rate")
@@ -155,7 +243,13 @@ def _timeline(reader):
     return first, previous, interval
 
 
-def export_episode_video(source, output, *, width=1200, tactile_view="contact"):
+def export_episode_video(
+    source, output, *, width=1200, tactile_view="contact", layout="rgb", depth_range=(0.03, 3.0), require_nslv2=False
+):
+    if layout not in ("rgb", "unified"):
+        raise ValueError("Video layout must be rgb or unified")
+    if layout == "unified":
+        tactile_view = "continuous"
     if tactile_view not in ("contact", "continuous"):
         raise ValueError("Tactile view must be contact or continuous")
     source, output = Path(source).resolve(), Path(output).resolve()
@@ -183,8 +277,24 @@ def export_episode_video(source, output, *, width=1200, tactile_view="contact"):
             conditioned_counts = dict.fromkeys(contact_counts, 0)
             for index in range(len(reader)):
                 frame = reader.read_frame(index)
-                image = rgb_preview(
-                    frame, index, len(reader), first["timestamp_ns"], width=width, tactile_view=tactile_view
+                if require_nslv2 and any(
+                    camera.get("provenance", {}).get("depth_sl_method") != "nsl_v2"
+                    for camera in frame["vision"].values()
+                ):
+                    raise ValueError(f"NSLv2 depth required for every camera at source frame {index}")
+                image = (
+                    unified_preview(
+                        frame,
+                        index,
+                        len(reader),
+                        first["timestamp_ns"],
+                        width=width,
+                        depth_range=depth_range,
+                    )
+                    if layout == "unified"
+                    else rgb_preview(
+                        frame, index, len(reader), first["timestamp_ns"], width=width, tactile_view=tactile_view
+                    )
                 )
                 if writer is None:
                     writer = VideoStreamWriter(str(temporary), image.height, image.width, 3, fps=fps)
@@ -247,7 +357,17 @@ def export_episode_video(source, output, *, width=1200, tactile_view="contact"):
                 "height": image.height,
                 "contact_conditioned_frames_by_pad": conditioned_counts,
                 "contact_active_frames_by_pad": contact_counts,
-                "views": ["head.rgb", "left_wrist.rgb", "right_wrist.rgb", *contact_counts],
+                "views": (
+                    [f"{name}.{field}" for name in ("head", "left_wrist", "right_wrist") for field in VISION_FIELDS]
+                    + list(contact_counts)
+                    if layout == "unified"
+                    else ["head.rgb", "left_wrist.rgb", "right_wrist.rgb", *contact_counts]
+                ),
+                "layout": layout,
+                "depth_display_range_m": list(depth_range) if layout == "unified" else None,
+                "invalid_depth_display_rgb": [130, 0, 130] if layout == "unified" else None,
+                "structured_light_source": reader.metadata["run"].get("nslv2", "recorded depth_sl"),
+                "nslv2_required_and_verified_every_frame": require_nslv2,
                 "tactile_view": tactile_view,
                 "tactile_rgb_field": "raw_optical_rgb" if tactile_view == "continuous" else "rgb",
                 "tactile_numeric_semantics": (
@@ -278,6 +398,19 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--width", type=int, default=1200)
     parser.add_argument(
+        "--layout",
+        choices=("rgb", "unified"),
+        default="rgb",
+        help="unified: all 15 vision streams plus four continuous tactile gel panels",
+    )
+    parser.add_argument("--depth-min", type=float, default=0.03)
+    parser.add_argument("--depth-max", type=float, default=3.0)
+    parser.add_argument(
+        "--require-nslv2",
+        action="store_true",
+        help="refuse any frame or camera without recorded NSLv2 depth provenance",
+    )
+    parser.add_argument(
         "--tactile-view",
         choices=("contact", "continuous"),
         default="contact",
@@ -286,7 +419,16 @@ def main():
     args = parser.parse_args()
     print(
         json.dumps(
-            export_episode_video(args.source, args.output, width=args.width, tactile_view=args.tactile_view), indent=2
+            export_episode_video(
+                args.source,
+                args.output,
+                width=args.width,
+                tactile_view=args.tactile_view,
+                layout=args.layout,
+                depth_range=(args.depth_min, args.depth_max),
+                require_nslv2=args.require_nslv2,
+            ),
+            indent=2,
         )
     )
 
