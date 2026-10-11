@@ -221,6 +221,8 @@ def main():
             plane_tilt_deg=args.plane_tilt_deg,
             validation_thresholds=dict(
                 stereo_median_relative_error=0.05,
+                stereo_p95_relative_error=0.05,
+                minimum_stereo_valid_fraction=0.25,
                 stereo_center_abs_error_m=0.08,
                 ground_truth_plane_median_abs_error_m=0.001,
                 minimum_depth_spatial_range_m=0.02,
@@ -260,6 +262,14 @@ def main():
                 if matched.any()
                 else None
             )
+            p95_relative_error = (
+                float(np.nanpercentile(np.abs(depth[matched] - reference[matched]) / reference[matched], 95))
+                if matched.any()
+                else None
+            )
+            p95_abs_error = (
+                float(np.nanpercentile(np.abs(depth[matched] - reference[matched]), 95)) if matched.any() else None
+            )
             sl_range = float(np.diff(np.nanpercentile(depth[finite], [10, 90]))[0]) if finite.any() else 0.0
             gt = frame["depth_gt"]
             gt_valid = np.isfinite(gt) & (gt > 0) & (gt < 10)
@@ -288,6 +298,8 @@ def main():
                 stereo_center_depth_m=center_depth,
                 stereo_plane_median_abs_error_m=reference_error,
                 stereo_plane_median_relative_error=relative_error,
+                stereo_plane_p95_relative_error=p95_relative_error,
+                stereo_plane_p95_abs_error_m=p95_abs_error,
                 stereo_center_abs_error_m=abs(center_depth - center_reference) if center_depth is not None else None,
                 stereo_depth_spatial_range_p10_p90_m=sl_range,
                 depth_gt_spatial_range_p10_p90_m=gt_range,
@@ -297,12 +309,14 @@ def main():
             if (
                 quality["ir_nonzero_fraction"] < 0.005
                 or quality["ir_std"] < 1
-                or quality["stereo_valid_fraction"] < 0.1
+                or quality["stereo_valid_fraction"] < 0.25
                 or median is None
                 or center_depth is None
                 or abs(center_depth - center_reference) > 0.08
                 or relative_error is None
                 or relative_error > 0.05
+                or p95_relative_error is None
+                or p95_relative_error > 0.05
                 or gt_reference_error is None
                 or gt_reference_error > 0.001
             ):

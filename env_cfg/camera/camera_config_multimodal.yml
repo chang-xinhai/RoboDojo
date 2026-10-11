@@ -20,6 +20,12 @@ structured_light:
   settle_render_passes: 5
   max_render_passes: 32
   max_disparity: 128
+  stereo_confidence:
+    # Reject independent reverse-disparity disagreement and weak IR texture.
+    # Confidence uses IR only; rejected depth remains NaN.
+    lr_max_diff_px: 0.5
+    min_texture_std_dn: 2.0
+    min_patch_correlation: 0.5
   rendering:
     # Native-resolution DLAA for projector-off RGB, spatial FXAA for IR.
     # Settings are scoped and restored after every frozen capture phase.

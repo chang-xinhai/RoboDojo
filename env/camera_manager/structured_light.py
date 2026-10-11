@@ -78,19 +78,46 @@ def active_ir(on, off, saturation_radiance):
     return np.rint(np.clip(radiance / saturation_radiance, 0, 1) * 255).astype(np.uint8)
 
 
-def reconstruct_stereo(left, right, fx, baseline_m, *, max_disparity=128, min_depth_m=0.05, max_depth_m=10):
-    """Triangulate rectified active stereo; invalid pixels are NaN, never GT."""
+def reconstruct_stereo(
+    left,
+    right,
+    fx,
+    baseline_m,
+    *,
+    max_disparity=128,
+    min_depth_m=0.05,
+    max_depth_m=10,
+    lr_max_diff_px=0.5,
+    min_texture_std_dn=2.0,
+    min_patch_correlation=0.5,
+):
+    """Triangulate only independently consistent, textured IR matches.
+
+    The right-to-left SGBM solve is independent of the left-to-right solve.
+    A bilinear correspondence must agree within the declared pixel tolerance
+    and both local windows must contain texture. Occlusions and ambiguous
+    matches remain NaN; neither confidence nor depth accesses renderer GT.
+    """
     import cv2
 
     if left.shape != right.shape or left.ndim != 2 or left.dtype != np.uint8 or right.dtype != np.uint8:
         raise ValueError("Stereo images must be same-shaped uint8 HW arrays")
-    if fx <= 0 or baseline_m <= 0:
+    if not np.isfinite(fx) or not np.isfinite(baseline_m) or fx <= 0 or baseline_m <= 0:
         raise ValueError("fx and baseline_m must be positive")
+    if not np.isfinite(lr_max_diff_px) or lr_max_diff_px <= 0:
+        raise ValueError("Left-right disparity tolerance must be positive and finite")
+    if not np.isfinite(min_texture_std_dn) or min_texture_std_dn < 0:
+        raise ValueError("Minimum IR texture must be finite and nonnegative")
+    if not np.isfinite(min_patch_correlation) or not -1 <= min_patch_correlation <= 1:
+        raise ValueError("Minimum IR patch correlation must be finite and within [-1, 1]")
+    if not np.isfinite(min_depth_m) or not np.isfinite(max_depth_m) or not 0 < min_depth_m < max_depth_m:
+        raise ValueError("Stereo depth range must be finite, positive and increasing")
+    if not np.isfinite(max_disparity) or max_disparity <= 0:
+        raise ValueError("Maximum disparity must be positive and finite")
     num_disparities = min(int(np.ceil(max_disparity / 16) * 16), (left.shape[1] // 16 - 1) * 16)
     if num_disparities < 16:
         raise ValueError("Stereo width must be at least 32 pixels")
-    matcher = cv2.StereoSGBM_create(
-        minDisparity=0,
+    settings = dict(
         numDisparities=num_disparities,
         blockSize=5,
         P1=8 * 25,
@@ -101,9 +128,60 @@ def reconstruct_stereo(left, right, fx, baseline_m, *, max_disparity=128, min_de
         speckleRange=2,
         mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY,
     )
-    disparity = matcher.compute(left, right).astype(np.float32) / 16
+    disparity = cv2.StereoSGBM_create(minDisparity=0, **settings).compute(left, right).astype(np.float32) / 16
+    reverse = (
+        cv2.StereoSGBM_create(minDisparity=-num_disparities, **settings).compute(right, left).astype(np.float32) / 16
+    )
+    rows, cols = np.indices(left.shape, dtype=np.float32)
+    right_cols = cols - disparity
+    reverse_at_match = cv2.remap(
+        reverse,
+        right_cols,
+        rows,
+        cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=-num_disparities - 1,
+    )
+    reverse_support = cv2.remap(
+        ((reverse >= -num_disparities) & (reverse < 0)).astype(np.float32),
+        right_cols,
+        rows,
+        cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    valid = (
+        (disparity > 0)
+        & (right_cols >= 0)
+        & (right_cols < left.shape[1])
+        & (reverse_at_match < 0)
+        & (reverse_at_match >= -num_disparities)
+        & (reverse_support >= 1 - 1e-6)
+        & (np.abs(disparity + reverse_at_match) <= lr_max_diff_px)
+    )
+    if min_texture_std_dn > 0:
+
+        def local_std(image):
+            image = image.astype(np.float32)
+            mean = cv2.boxFilter(image, -1, (5, 5))
+            return np.sqrt(np.maximum(cv2.boxFilter(image * image, -1, (5, 5)) - mean * mean, 0))
+
+        right_std = cv2.remap(local_std(right), right_cols, rows, cv2.INTER_LINEAR)
+        valid &= (local_std(left) >= min_texture_std_dn) & (right_std >= min_texture_std_dn)
+    # Normalize local photometric evidence for each eye's brightness/contrast.
+    # A fixed DN difference rejects bright aliased dots even when they match.
+    # Independent wrong textures can occasionally satisfy reciprocal disparity;
+    # they must also agree in their measured local intensity arrangement.
+    warped_right = cv2.remap(right.astype(np.float32), right_cols, rows, cv2.INTER_LINEAR)
+    left_float = left.astype(np.float32)
+    left_mean = cv2.boxFilter(left_float, -1, (5, 5))
+    right_mean = cv2.boxFilter(warped_right, -1, (5, 5))
+    left_variance = np.maximum(cv2.boxFilter(left_float * left_float, -1, (5, 5)) - left_mean * left_mean, 0)
+    right_variance = np.maximum(cv2.boxFilter(warped_right * warped_right, -1, (5, 5)) - right_mean * right_mean, 0)
+    covariance = cv2.boxFilter(left_float * warped_right, -1, (5, 5)) - left_mean * right_mean
+    correlation = covariance / np.sqrt(np.maximum(left_variance * right_variance, 1e-8))
+    valid &= correlation >= min_patch_correlation
     depth = np.full(left.shape, np.nan, dtype=np.float32)
-    valid = disparity > 0
     depth[valid] = fx * baseline_m / disparity[valid]
     depth[(depth < min_depth_m) | (depth > max_depth_m)] = np.nan
     return depth
@@ -530,12 +608,21 @@ class StructuredLightCapture:
                     k, models["ir_right"]["K"], atol=1e-3, rtol=0
                 ):
                     raise RuntimeError("Rendered stereo pair is not parallel with the configured horizontal baseline")
+                confidence = {
+                    key: float(self.config.get("stereo_confidence", {}).get(key, default))
+                    for key, default in (
+                        ("lr_max_diff_px", 0.5),
+                        ("min_texture_std_dn", 2.0),
+                        ("min_patch_correlation", 0.5),
+                    )
+                }
                 depth_sl = reconstruct_stereo(
                     ir["ir_left"],
                     ir["ir_right"],
                     k[0, 0],
                     self.baseline,
                     max_disparity=int(self.config.get("max_disparity", 128)),
+                    **confidence,
                 )
                 transforms = {view: model["T_world_from_optical"] for view, model in models.items()}
                 result[name] = dict(
@@ -561,6 +648,7 @@ class StructuredLightCapture:
                         depth_gt_frame="rgb",
                         depth_sl_frame="ir_left",
                         depth_unit="m",
+                        stereo_confidence={**confidence, "texture_window_px": 5, "valid_depth_range_m": [0.05, 10.0]},
                     ),
                     provenance=dict(
                         ir="independent_eye_ambient_plus_active_hdr_electron_adc_proxy"
@@ -574,6 +662,12 @@ class StructuredLightCapture:
                         ir_spectral_model="visible_radiance_proxy_no_NIR_material_response",
                         depth_gt="distance_to_image_plane_ground_truth",
                         depth_sl="rectified_active_stereo_sgbm_triangulation",
+                        stereo_confidence={
+                            **confidence,
+                            "method": "independent_reverse_sgbm_bilinear_consistency_texture_and_normalized_patch_correlation",
+                            "texture_window_px": 5,
+                            "rejected_matches": "NaN; no GT filtering or filling",
+                        },
                         pattern=self.pattern,
                         pattern_sha256=self.pattern_sha256,
                         direction_texture=self.direction_texture,

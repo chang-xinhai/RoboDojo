@@ -19,6 +19,14 @@ both depth outputs are `float32 HW` in meters. `depth_gt` is RTX
 with StereoSGBM from the rectified IR pair in the left IR optical frame. Invalid
 SL pixels are NaN and are never filled from simulator ground truth.
 
+The reconstruction also solves right-to-left SGBM independently and samples its
+disparity at each left-to-right correspondence. It rejects disagreement over
+0.5 pixels, local 5x5 IR texture standard deviation below 2 DN in either eye,
+and normalized matched-patch correlation below 0.5. These configurable
+`stereo_confidence` thresholds are recorded in calibration and provenance.
+Confidence uses only the two measured IR views; it does not inspect GT depth.
+Rejected pixels remain NaN, including stereo occlusions and search borders.
+
 The runtime authors real RTX `RectLight` projectors with a deterministic dot
 texture, an octahedral direction-to-pattern UV EXR lookup, `ShapingAPI`,
 `isProjector=True`, and `visibleInPrimaryRay=False`, following NVIDIA's
@@ -133,6 +141,37 @@ are 0.668, 0.963, and 1.629 cm. Valid stereo coverage is 79.54%, 61.98%, and
 66.83%, with invalid pixels retained as NaN. GT agrees with the analytic plane
 within 1e-7 m median. Reports preserve actual live phase settings and raw
 projector-only radiance in `quality-iteration/sl-reference-{plane-v3,tilted-v1}/`.
+
+Independent auditing of this initial full-profile result found a right-wrist
+95th-percentile relative error of 15.20% (35.84 cm absolute) despite its 1.22%
+median. The original reports and raw captures are retained. CPU replay of those
+same native IR inputs with the explicit confidence checks yields:
+
+| 30-degree target | Valid fraction, original → confidence | Median relative error | P95 relative error, original → confidence |
+| --- | --- | --- | --- |
+| Head | 79.54% → 57.09% | 0.814% | 4.902% → 2.405% |
+| Left wrist | 61.98% → 51.56% | 0.753% | 2.655% → 2.334% |
+| Right wrist | 66.83% → 45.60% | 0.960% | 15.198% → 2.875% |
+
+These are CPU reprocessing results, not a fresh RTX acquisition. Front-facing
+plane confidence coverage is 54.71–58.27%, with P95 error 0.392–0.775%.
+The same IR-only method on the first preserved TaskEnv frame retains
+31.13%, 11.40%, and 12.64% of head/left/right pixels. Evaluation projects the
+predicted left-IR points into the independently rendered RGB GT frame and
+reports P95 relative errors of 2.261%, 1.229%, and 1.218%. GT participates only
+in that error calculation, not confidence, masks or reconstruction. Task
+occlusions and unilluminated backgrounds limit stereo coverage; RGB GT remains
+a separate output. The CPU replay saves a new depth file without rewriting any
+original recording. The live plane script now requires both median and P95
+relative error at most 5% and coverage at least 25%.
+
+```sh
+bash reproduction/isaac61/run.sh python scripts/check_stereo_confidence.py \
+  --plane-dir reproduction/isaac61/outputs/quality-iteration/sl-reference-plane-v3 \
+  --plane-dir reproduction/isaac61/outputs/quality-iteration/sl-reference-tilted-v1 \
+  --hdf5 reproduction/isaac61/outputs/quality-iteration/native-three-v1/episode.hdf5 \
+  --output reproduction/isaac61/outputs/quality-iteration/stereo-confidence/cpu-replay
+```
 
 The complete three-frame StackBowls recording with these settings passed exact
 6.1 acquisition and lossless HDF5 validation. Its PNG/video/HTML preview reads

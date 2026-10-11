@@ -102,7 +102,8 @@ class StructuredLightTests(unittest.TestCase):
         # A 12-pixel horizontal disparity gives z=300*0.05/12=1.25 m.
         right[:, :-12] = left[:, 12:]
         depth = sl.reconstruct_stereo(left, right, 300, 0.05, max_disparity=64)
-        interior = depth[10:-10, 80:-20]
+        # Both independent SGBM searches need a full disparity-search border.
+        interior = depth[10:-10, 80:-80]
         self.assertGreater(np.isfinite(interior).mean(), 0.9)
         self.assertAlmostEqual(float(np.nanmedian(interior)), 1.25, places=2)
 
@@ -110,12 +111,77 @@ class StructuredLightTests(unittest.TestCase):
         image = np.zeros((64, 160), np.uint8)
         self.assertTrue(np.isnan(sl.reconstruct_stereo(image, image, 300, 0.05, max_disparity=32)).all())
 
+    def test_occluded_eye_region_is_rejected_without_filling_known_depth(self):
+        rng = np.random.default_rng(17)
+        left = rng.integers(0, 256, (96, 384), dtype=np.uint8)
+        right = np.zeros_like(left)
+        right[:, :-12] = left[:, 12:]
+        # An actual occluder replaces this right-eye region, so there is no
+        # corresponding measurement for left columns 140 through 180.
+        right[:, 128:168] = 0
+        depth = sl.reconstruct_stereo(left, right, 300, 0.05, max_disparity=64)
+        self.assertGreater(np.isnan(depth[8:-8, 145:175]).mean(), 0.98)
+        visible = depth[8:-8, 200:270]
+        self.assertGreater(np.isfinite(visible).mean(), 0.95)
+        self.assertAlmostEqual(float(np.nanmedian(visible)), 1.25, places=2)
+
+    def test_independent_mismatched_eyes_do_not_become_dense_plausible_depth(self):
+        rng = np.random.default_rng(19)
+        left = rng.integers(0, 256, (96, 384), dtype=np.uint8)
+        right = rng.integers(0, 256, left.shape, dtype=np.uint8)
+        depth = sl.reconstruct_stereo(left, right, 300, 0.05, max_disparity=64)
+        self.assertLess(np.isfinite(depth).mean(), 0.01)
+
+    def test_invalid_reverse_endpoint_cannot_interpolate_into_a_consistent_match(self):
+        from types import SimpleNamespace
+
+        left = np.full((32, 160), 80, np.uint8)
+        forward = np.full(left.shape, -16, np.int16)
+        reverse = np.full(left.shape, -129 * 16, np.int16)
+        forward[16, 100] = int(65.5 * 16)
+        # At xR=34.5, averaging invalid -129 and valid -2 produces -65.5.
+        # That falsely agrees exactly unless BOTH interpolation endpoints
+        # have real right-to-left measurements.
+        reverse[16, 35] = -2 * 16
+        forward[16, 120] = 16 * 16
+        reverse[16, 104] = -16 * 16
+        solvers = [SimpleNamespace(compute=lambda *args: forward), SimpleNamespace(compute=lambda *args: reverse)]
+        with patch("cv2.StereoSGBM_create", side_effect=solvers):
+            depth = sl.reconstruct_stereo(
+                left,
+                left,
+                300,
+                0.05,
+                max_disparity=128,
+                min_texture_std_dn=0,
+                min_patch_correlation=-1,
+            )
+        self.assertTrue(np.isnan(depth[16, 100]))
+        self.assertEqual(depth[16, 120], 300 * 0.05 / 16)
+
     def test_invalid_stereo_inputs_fail(self):
         image = np.zeros((64, 160), np.uint8)
         with self.assertRaises(ValueError):
             sl.reconstruct_stereo(image, image, 300, 0)
         with self.assertRaises(ValueError):
             sl.reconstruct_stereo(image.astype(float), image, 300, 0.05)
+        for key, value in (
+            ("lr_max_diff_px", 0),
+            ("lr_max_diff_px", float("nan")),
+            ("min_texture_std_dn", -1),
+            ("min_patch_correlation", 1.1),
+            ("min_patch_correlation", float("nan")),
+            ("min_depth_m", 0),
+            ("min_depth_m", float("nan")),
+            ("max_depth_m", 0.01),
+            ("max_depth_m", float("inf")),
+            ("max_disparity", float("nan")),
+        ):
+            with self.assertRaises(ValueError):
+                sl.reconstruct_stereo(image, image, 300, 0.05, **{key: value})
+        for focal, baseline in ((float("nan"), 0.05), (300, float("nan")), (float("inf"), 0.05), (300, -0.05)):
+            with self.assertRaises(ValueError):
+                sl.reconstruct_stereo(image, image, focal, baseline)
 
     def test_projector_assets_are_deterministic_and_directional(self):
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
