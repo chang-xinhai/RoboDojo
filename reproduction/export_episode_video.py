@@ -46,14 +46,18 @@ def _fit_font(draw, text, maximum_width, preferred_size):
     raise ValueError("Preview label cannot fit the available width")
 
 
-def rgb_preview(frame, index, count, initial_timestamp_ns, *, width=1200):
+def rgb_preview(frame, index, count, initial_timestamp_ns, *, width=1200, tactile_view="contact"):
     """Preserve image aspect and actual uint8 intensities; display source contact flags."""
     if width < 600 or width % 12:
         raise ValueError("Video width must be at least 600 pixels and divisible by 12")
+    if tactile_view not in ("contact", "continuous"):
+        raise ValueError("Tactile view must be contact or continuous")
+    continuous = tactile_view == "continuous"
+    footer_height = 28 if continuous else 0
     header, label_height = 64, 30
     head_width = width * 2 // 3
     camera_height = head_width * 3 // 4
-    pad_height = width // 4 + label_height
+    pad_height = width // 4 + label_height + footer_height
     height = header + camera_height + pad_height
     # libx264 yuv420p needs even dimensions.
     height += height % 2
@@ -71,7 +75,11 @@ def rgb_preview(frame, index, count, initial_timestamp_ns, *, width=1200):
         font=_fit_font(draw, heading, width - 20, font_size),
         fill="white",
     )
-    legend = "No tube contact = zero tactile; raw gel retained in HDF5. L0/L1: left; R0/R1: right."
+    legend = (
+        "Live gel RGB throughout; no contact = zero force / penetration. L0/L1: left; R0/R1: right."
+        if continuous
+        else "No tube contact = zero tactile; raw gel retained in HDF5. L0/L1: left; R0/R1: right."
+    )
     draw.text(
         (10, 34),
         legend,
@@ -79,13 +87,21 @@ def rgb_preview(frame, index, count, initial_timestamp_ns, *, width=1200):
         fill="#a9c9df",
     )
 
-    def tile(rgb, box, label):
+    def tile(rgb, box, label, footer=None):
         x, y, w, h = box
         draw.text((x + 7, y + 5), label, font=_fit_font(draw, label, w - 14, font_size), fill="white")
-        content = Image.new("RGB", (w, h - label_height), "black")
+        bottom = footer_height if footer is not None else 0
+        content = Image.new("RGB", (w, h - label_height - bottom), "black")
         image = ImageOps.contain(Image.fromarray(np.asarray(rgb, dtype=np.uint8)).convert("RGB"), content.size)
         content.paste(image, ((content.width - image.width) // 2, (content.height - image.height) // 2))
         canvas.paste(content, (x, y + label_height))
+        if footer is not None:
+            draw.text(
+                (x + 7, y + h - bottom + 5),
+                footer,
+                font=_fit_font(draw, footer, w - 14, min(font_size, 16)),
+                fill="#a9c9df",
+            )
 
     tile(frame["vision"]["head"]["rgb"], (0, header, head_width, camera_height), "HEAD RGB")
     wrist_width = width - head_width
@@ -99,13 +115,24 @@ def rgb_preview(frame, index, count, initial_timestamp_ns, *, width=1200):
         data = frame["tactile"][side][finger]
         conditioned = data.get("provenance", {}).get("contact_conditioned_observations") is True
         if conditioned:
-            state = "CONTACT" if bool(data["contact_active"]) else "NO CONTACT (zero)"
+            state = "CONTACT" if bool(data["contact_active"]) else "NO CONTACT" if continuous else "NO CONTACT (zero)"
         else:
             state = "RAW / contact unspecified"
+        field = "raw_optical_rgb" if continuous else "rgb"
+        if field not in data:
+            raise ValueError(f"Continuous tactile display requires recorded raw_optical_rgb: {side}.{finger}")
+        footer = None
+        if continuous:
+            normal = np.asarray(data["normal_force"], dtype=np.float64)
+            shear = np.asarray(data["shear_force"], dtype=np.float64)
+            force_peak = float(np.sqrt(normal**2 + (shear**2).sum(axis=-1)).max())
+            penetration_mm = float(np.asarray(data["penetration_depth"]).max()) * 1000
+            footer = f"Fpeak {force_peak:.4f} N | pen {penetration_mm:.3f} mm"
         tile(
-            data["rgb"][..., :3],
+            data[field][..., :3],
             (column * width // 4, header + camera_height, width // 4, pad_height),
             f"{side[0].upper()}{finger[-1]}: {state}",
+            footer=footer,
         )
     return canvas
 
@@ -128,7 +155,9 @@ def _timeline(reader):
     return first, previous, interval
 
 
-def export_episode_video(source, output, *, width=1200):
+def export_episode_video(source, output, *, width=1200, tactile_view="contact"):
+    if tactile_view not in ("contact", "continuous"):
+        raise ValueError("Tactile view must be contact or continuous")
     source, output = Path(source).resolve(), Path(output).resolve()
     if source.is_dir():
         source = source / "episode.hdf5"
@@ -154,7 +183,9 @@ def export_episode_video(source, output, *, width=1200):
             conditioned_counts = dict.fromkeys(contact_counts, 0)
             for index in range(len(reader)):
                 frame = reader.read_frame(index)
-                image = rgb_preview(frame, index, len(reader), first["timestamp_ns"], width=width)
+                image = rgb_preview(
+                    frame, index, len(reader), first["timestamp_ns"], width=width, tactile_view=tactile_view
+                )
                 if writer is None:
                     writer = VideoStreamWriter(str(temporary), image.height, image.width, 3, fps=fps)
                 writer.append(np.asarray(image))
@@ -217,6 +248,14 @@ def export_episode_video(source, output, *, width=1200):
                 "contact_conditioned_frames_by_pad": conditioned_counts,
                 "contact_active_frames_by_pad": contact_counts,
                 "views": ["head.rgb", "left_wrist.rgb", "right_wrist.rgb", *contact_counts],
+                "tactile_view": tactile_view,
+                "tactile_rgb_field": "raw_optical_rgb" if tactile_view == "continuous" else "rgb",
+                "tactile_numeric_semantics": (
+                    "Fpeak: maximum unchanged official per-taxel force vector norm in N; "
+                    "pen: maximum native penetration in mm"
+                    if tactile_view == "continuous"
+                    else None
+                ),
                 "task_success_claimed_by_exporter": False,
             }
         temporary.replace(output)
@@ -238,8 +277,18 @@ def main():
     parser.add_argument("source", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--width", type=int, default=1200)
+    parser.add_argument(
+        "--tactile-view",
+        choices=("contact", "continuous"),
+        default="contact",
+        help="continuous shows recorded raw gel RGB at every frame with actual force/penetration values",
+    )
     args = parser.parse_args()
-    print(json.dumps(export_episode_video(args.source, args.output, width=args.width), indent=2))
+    print(
+        json.dumps(
+            export_episode_video(args.source, args.output, width=args.width, tactile_view=args.tactile_view), indent=2
+        )
+    )
 
 
 if __name__ == "__main__":

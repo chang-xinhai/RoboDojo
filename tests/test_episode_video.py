@@ -17,6 +17,52 @@ from utils.multimodal_hdf5 import HDF5Writer
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "CPU video encoding/decoding tools required")
 class EpisodeVideoTests(unittest.TestCase):
+    def test_continuous_gel_survives_idle_contact_and_release_without_mutating_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            colors = []
+            with HDF5Writer(directory / "source", {"synthetic_cpu_fixture": True}) as writer:
+                for index in range(5):
+                    active = index in (1, 2)
+                    frame = contact_fixture(active, index + 1)
+                    color = (40 + 25 * index, 120 + index, 170 - index)
+                    colors.append(color)
+                    for fingers in frame["tactile"].values():
+                        for data in fingers.values():
+                            data["raw_optical_rgb"][:] = color
+                            if active:
+                                data["rgb"] = data["raw_optical_rgb"].copy()
+                    writer.append(frame)
+            original_sha = hashlib.sha256(writer.path.read_bytes()).hexdigest()
+            video = directory / "continuous.mp4"
+            report = export_episode_video(writer.path, video, width=600, tactile_view="continuous")
+            self.assertEqual(report["decoded_frames"], 5)
+            self.assertEqual(report["video_fps"], 25)
+            self.assertEqual(report["tactile_view"], "continuous")
+            self.assertEqual(report["tactile_rgb_field"], "raw_optical_rgb")
+            self.assertEqual(set(report["contact_active_frames_by_pad"].values()), {2})
+            decoded = subprocess.run(
+                ["ffmpeg", "-v", "error", "-i", str(video), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                check=True,
+                capture_output=True,
+            ).stdout
+            images = np.frombuffer(decoded, np.uint8).reshape(5, report["height"], report["width"], 3)
+            for index, color in enumerate(colors):
+                for column in range(4):
+                    # All four live gel panels include the current recorded
+                    # idle baseline as well as the contact and release frames.
+                    actual = images[index, 434, column * 150 + 70].astype(int)
+                    self.assertLess(np.abs(actual - color).max(), 8)
+            self.assertEqual(hashlib.sha256(writer.path.read_bytes()).hexdigest(), original_sha)
+
+    def test_continuous_view_requires_recorded_raw_gel_and_rejects_unknown_modes(self):
+        frame = contact_fixture(False)
+        del frame["tactile"]["left"]["finger_0"]["raw_optical_rgb"]
+        with self.assertRaisesRegex(ValueError, "recorded raw_optical_rgb"):
+            rgb_preview(frame, 0, 2, frame["sync"]["timestamp_ns"], tactile_view="continuous")
+        with self.assertRaisesRegex(ValueError, "contact or continuous"):
+            rgb_preview(frame, 0, 2, frame["sync"]["timestamp_ns"], tactile_view="invented")
+
     def test_all_five_source_frames_decode_at_actual_25_hz_with_contact_and_sha(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)

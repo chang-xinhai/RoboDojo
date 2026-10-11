@@ -34,10 +34,11 @@ bash reproduction/isaac61/run.sh collect \
 `native-contact-trace.npz` 独立保留四指尖 × 三试管的距离、未修改的原始力、穿入量和真实姿态；`native-task-inventory.json` 检查初末原装物体、动态试管和无附加固定关节。原始记录用于复核零触觉和任务成功。
 
 ```bash
-# 完整 RGB / 触觉任务视频，保持全部帧和物理时间：
+# 完整 RGB / 触觉任务视频，胶面全程可见，并显示真实力与压入量：
 bash reproduction/isaac61/run.sh python reproduction/export_episode_video.py \
   reproduction/isaac61/outputs/insert-tubes/full-episode-final/episode.hdf5 \
-  --output reproduction/isaac61/outputs/insert-tubes/full-episode-final/insert-tubes.mp4
+  --tactile-view continuous \
+  --output reproduction/isaac61/outputs/insert-tubes/full-episode-final/insert-tubes-continuous-tactile.mp4
 
 # 全部帧的多模态视频和最强接触 PNG：
 bash reproduction/isaac61/run.sh visualize \
@@ -52,6 +53,10 @@ bash reproduction/isaac61/run.sh visualize \
 
 HTML 可按帧查看 RGB、光学差分、官方 taxel 力、胶面坐标力，以及保留的 raw optical 模式。视频和浏览器都直接读 HDF5，不需要先导出 NPZ。
 
+`--tactile-view continuous` 在每一帧显示该帧实际记录的 `raw_optical_rgb`，因此空夹和松爪后仍显示正常胶面。四指分别显示实际 taxel 力向量模长的最大值 `Fpeak`（N）和原始压入量最大值 `pen`（mm）；无接触时两项为零。连续显示不重用静态基线图、不改 HDF5 或原始力。省略此选项时保留原来的接触条件化图像显示。
+
+连续显示版本已完整导出 1228 帧、25 FPS、49.12 秒；相关测试通过 8 项及 13 个子测试。独立复核实际解码的起始、三次夹管和结束画面（帧 0、725、904、1074、1227），四指胶面均与对应帧原始 RGB 一致，起始与结束的力和压入量为零。复核报告为 `reproduction/isaac61/outputs/review/insert-tubes-episode/continuous-video-independent-audit.json`；本次是视频显示验证，沿用下述原生任务全帧验收。
+
 ## 已完成的原生记录（2026-10-11）
 
 `reproduction/isaac61/outputs/insert-tubes/full-episode-final/` 中的完整记录已正常退出，封存后的 1228 帧逐帧校验通过。三根试管的九项原任务插入判据、双臂回位和夹爪松开均通过，最终奖励为 1、得分为 100。三根试管的实际最大提升高度分别为 119.11、98.93、99.13 mm。
@@ -62,6 +67,7 @@ HTML 可按帧查看 RGB、光学差分、官方 taxel 力、胶面坐标力，�
 | --- | --- |
 | `episode.hdf5` | 三站 RGB、GT/SL 深度、双目 IR、四指触觉、动作和同步时钟 |
 | `insert-tubes.mp4` | 完整 head / wrist RGB 和接触触觉任务预览 |
+| `insert-tubes-continuous-tactile.mp4` | 胶面全程可见，包含四指接触状态及真实力、压入量 |
 | `full-multimodal-video/multimodal.mp4` | 完整 RGB / Depth / IR / tactile 预览 |
 | `viewer-overview/multimodal.html` | 八模式交互概览 |
 | `tactile-timeline.png` | 全程原始力、压入量和接触状态 |
