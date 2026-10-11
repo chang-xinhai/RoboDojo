@@ -441,6 +441,7 @@ class LayoutManager:
         return label_list
 
     def get_instance_pose(self, env_idx: int, label: str = None, inst_name: str = None, relative: bool = True):
+        """Return live XYZ/WXYZ NumPy snapshots for CPU task geometry/rewards."""
         if inst_name is None:
             inst_name = self.get_instance_name(env_idx, label)
         if inst_name is None:
@@ -449,16 +450,22 @@ class LayoutManager:
         instance_type = self.instance_type_by_env[env_idx].get(inst_name, None)
         obj = self.get_scene_object(env_idx, inst_name)
         if instance_type in ["rigid", "articulation"]:
-            pos, rot, device = obj._get_object_transform()
+            pos, rot, _ = obj._get_object_transform()
+            if isinstance(pos, torch.Tensor):
+                pos = pos.detach().cpu().numpy()
+            if isinstance(rot, torch.Tensor):
+                rot = rot.detach().cpu().numpy()
             if not relative:
-                env_pos = deepcopy(self.scene_manager.env_origins[env_idx]).to(device)
-                pos = pos + env_pos
-            return (pos, rot)
+                env_pos = self.scene_manager.env_origins[env_idx]
+                if isinstance(env_pos, torch.Tensor):
+                    env_pos = env_pos.detach().cpu().numpy()
+                pos = np.asarray(pos) + np.asarray(env_pos)
+            return (np.asarray(pos).copy(), np.asarray(rot).copy())
         elif instance_type in ["garment", "geometry"]:
-            state = obj.get_state(is_relative=True)
+            state = obj.get_state(is_relative=relative)
             root_pose = state["root_pose"].detach().cpu().numpy()
-            pos = root_pose[:3]
-            rot = root_pose[3:]
+            pos = root_pose[:3].copy()
+            rot = root_pose[3:].copy()
             return (pos, rot)
 
     def get_label_descriptions(self, env_idx, label=None, inst_name=None):

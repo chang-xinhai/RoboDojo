@@ -12,7 +12,7 @@ from pxr import Gf, Sdf, Usd, UsdGeom
 import torch
 
 from env.scene_manager.layout_manager import LayoutManager
-from utils.live_geometry import get_live_world_transform
+from utils.live_geometry import get_live_world_transform, transform_points_world
 
 
 class RigidObject(SingleRigidPrim, SingleGeometryPrim):
@@ -151,10 +151,7 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
         points_local = np.array(mesh_prim.GetPointsAttr().Get(), dtype=np.float32)
         world_tf = get_live_world_transform(self, mesh_prim.GetPrim())
 
-        points_world = np.array(
-            [list(world_tf.Transform(Gf.Vec3d(float(p[0]), float(p[1]), float(p[2])))) for p in points_local],
-            dtype=np.float32,
-        )
+        points_world = transform_points_world(points_local, world_tf)
 
         rot_quat = Gf.Transform(world_tf).GetRotation().GetQuat()
         pos_world = np.array(world_tf.ExtractTranslation(), dtype=np.float32)

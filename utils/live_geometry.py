@@ -23,6 +23,17 @@ def _physics_view(owner):
     return view
 
 
+def transform_points_world(points, matrix):
+    """Apply a USD row-vector affine in NumPy, avoiding per-vertex Gf calls."""
+    points = np.asarray(points, dtype=np.float64)
+    matrix = np.asarray(matrix, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3 or matrix.shape != (4, 4):
+        raise ValueError("World geometry transform requires points (N, 3) and an affine matrix (4, 4)")
+    if not np.allclose(matrix[:, 3], [0, 0, 0, 1], atol=1e-12, rtol=0):
+        raise ValueError("World geometry transform requires a USD affine matrix")
+    return (points @ matrix[:3, :3] + matrix[3, :3]).astype(np.float32)
+
+
 def get_live_world_transform(owner, prim):
     """Return a descendant's world affine using its nearest live rigid body.
 
