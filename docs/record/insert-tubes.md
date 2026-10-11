@@ -19,7 +19,7 @@ bash reproduction/isaac61/run.sh collect \
 
 源文件 SHA256：`ce079f7ef7ecb63fdaabc6d24eacab3e4898f59321a692145901c6709c740bbe`。源文件来自本机官方 RoboDojo 数据池；`--expert-source` 也接受它的原路径。每次运行指定新的输出目录。
 
-`--frames` 是采集上限，完整执行后自动停止。发布完成的 `episode.hdf5` 前，必须通过三根管子的九项原始判据、双臂回位、夹爪松开、真实奖励为 1 和原任务计分为 100 的检查。计分通过每个真实物理帧调用原始奖励管理器推进，不在结束时重复调用。失败只保留明确标记的 partial 文件。
+`--frames` 是采集上限，完整执行后自动停止。发布完成的 `episode.hdf5` 前，必须通过三根管子的九项原始判据、双臂回位、夹爪松开、真实奖励为 1 和原任务计分为 100 的检查。计分在每个采集帧对应的真实物理帧调用原始奖励管理器推进，同一物理帧不重复推进。失败只保留明确标记的 partial 文件。
 
 ## 触觉为零的含义
 
@@ -51,3 +51,38 @@ bash reproduction/isaac61/run.sh visualize \
 ```
 
 HTML 可按帧查看 RGB、光学差分、官方 taxel 力、胶面坐标力，以及保留的 raw optical 模式。视频和浏览器都直接读 HDF5，不需要先导出 NPZ。
+
+## 已完成的原生记录（2026-10-11）
+
+`reproduction/isaac61/outputs/insert-tubes/full-episode-final/` 中的完整记录已正常退出，封存后的 1228 帧逐帧校验通过。三根试管的九项原任务插入判据、双臂回位和夹爪松开均通过，最终奖励为 1、得分为 100。三根试管的实际最大提升高度分别为 119.11、98.93、99.13 mm。
+
+采集为 25 Hz；原生时钟从 1.412 s 到 50.492 s，跨度 49.08 s。完整任务视频和完整多模态视频均保留全部 1228 帧，时长 49.12 s，包含最后一帧的 0.04 s 显示时间。交互 HTML 是每 25 帧取一帧的概览，共 50 帧；两个完整视频和 HDF5 未降采样。
+
+| 文件 | 内容 |
+| --- | --- |
+| `episode.hdf5` | 三站 RGB、GT/SL 深度、双目 IR、四指触觉、动作和同步时钟 |
+| `insert-tubes.mp4` | 完整 head / wrist RGB 和接触触觉任务预览 |
+| `full-multimodal-video/multimodal.mp4` | 完整 RGB / Depth / IR / tactile 预览 |
+| `viewer-overview/multimodal.html` | 八模式交互概览 |
+| `tactile-timeline.png` | 全程原始力、压入量和接触状态 |
+| `process-exit.json` | 实际采集进程的退出凭据 |
+
+四个指尖共 4912 个采样状态，其中 3287 个无接触状态的条件化触觉 RGB、Depth、光学差分、原始力和压入量严格为零。三根试管的接触来源均在独立的原生查询记录中验证；下表的帧号从 0 开始。
+
+| 指尖 | 实际试管接触区间 |
+| --- | --- |
+| left.finger_0 | tube0：62–726；tube2：1045–1117 |
+| left.finger_1 | tube0：62–725；tube2：1045–1117 |
+| right.finger_0 / finger_1 | tube1：895–969 |
+
+CPU 回归通过 569 项测试和 97 项子测试。独立完整审查还核验了全部 1228 帧的原始任务几何、正常计分、初末物体清单、触觉查询和图像，以及视频的每一个解码帧与 HDF5 的对应关系；审查结果为 `passed`，原生错误计数为 0。审查及实际 CPU 退出凭据位于 `reproduction/isaac61/outputs/review/insert-tubes-episode/final-independent-audit.json` 和同目录的 `final-independent-audit-cpu-receipt.json`。
+
+本次 HDF5 SHA256：`ee3393033932de9d4422b56f07f6c1ad465b549555bf9346cfa043f1b272d614`。捕获时源码提交记录为 `681a2bb`，当次实际运行文件的哈希另行记录；独立审查确认所有采集运行依赖的源码字节一致。审查时仓库为 `d63d7fc`，之后的离线工具和文档提交不作为本次捕获提交。
+
+## 近距离结构光补充
+
+原始 50 mm 双目基线、128 px 视差搜索会遗漏约 6 cm 的腕部近景。额外的 CPU 离线工具使用同一对原始 IR 和原始标定扩大搜索，经一致性和实际 IR 图像证据筛选后，只补原始 SL 的 NaN。原始有限深度逐位保留，GT 深度不参与重建；原始 `episode.hdf5` 不修改。补充深度仍是稀疏测量，不能把完整的存储或来源核验解释为全图深度精度认证。
+
+完整 1228 帧的旁路文件位于 `reproduction/isaac61/outputs/insert-tubes/structured-light-derived/episode.derived-sl.hdf5`，SHA256 为 `a655304f28c3e865bea75830a5c1887bccd79e3bce35ec879ec6b072723b9d0d`。同目录 `visualization/near-range-derived.mp4` 也是完整 25 Hz、49.12 s 的视频，所有 SL 图块明确标为 `near-range derived SL`；RGB、GT、IR 和触觉仍读原始 HDF5。`visualization/near-range-derived.png` 是预先选定的第 296 帧。
+
+可复现的重建、续处理和 HDF5 可视化命令见 [离线工具说明](../../reproduction/isaac61/sl_near_range/README.md)。工具逐帧核对源 IR、标定、时钟、原始深度及补充掩码，拒绝未完成文件、活跃文件别名和既有完成输出。移植后的工具另通过近视差及错误匹配、遮挡、续处理损坏、输入别名、旧输出拒绝等 CPU 检查，以及无 `PYTHONPATH`、临时工作目录下的独立 CLI 启动测试。
