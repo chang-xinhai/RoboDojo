@@ -13,6 +13,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 BOOTSTRAP = r"""
+import json
 import os
 from pathlib import Path
 import runpy
@@ -39,17 +40,6 @@ class Launcher:
 
 install("isaaclab.app", AppLauncher=Launcher)
 
-class OmegaConf:
-    @staticmethod
-    def create(value):
-        def convert(item):
-            if isinstance(item, dict):
-                return SimpleNamespace(**{key: convert(child) for key, child in item.items()})
-            return item
-        return convert(value)
-
-install("omegaconf", OmegaConf=OmegaConf)
-
 class RigidObject(SimpleNamespace):
     def __init__(self, prim_path):
         super().__init__(prim_path=prim_path, default_pos=[0.1, 0.2, 0.8], position=[100000.0, 100000.0, 100000.0])
@@ -63,10 +53,20 @@ class PhysicsContext:
 
 class Env:
     dt = .04
-    env_seed_list = [0]
+    num_envs = 1
+    env_seed_list = [3]
     def __init__(self, cfg, app, **kwargs):
         assert cfg.tactile["enabled"], "TacSL config was not passed to environment"
         assert cfg.saved_layouts[0]["Rigid"]["test_object"], "Layout must exist before task construction"
+        assert list(cfg.sim.seed) == [3] and kwargs["seed"] == 3
+        assert cfg.eval_cfg.seed == 2 and cfg.eval_cfg.episode_seed == 3
+        assert [(robot.robot_name, robot.get("type", "target")) for robot in cfg.robot.robots] == [
+            ("x5", "target"), ("x5", "target"), ("franka", "support")]
+        assert all(robot.need_planner is False for robot in cfg.robot.robots)
+        assert cfg.camera.default_frequency == 25
+        self.lifecycle = []
+        self.robot_manager = SimpleNamespace(
+            set_origin_endpose=self.set_origin_endpose, set_robot_init_state=self.set_robot_init_state)
         objects = {} if mode == "empty_scene" else {"test": RigidObject(prim_path="/World/test")}
         self.scene_manager = SimpleNamespace(
             _rigid_and_dynamic_objects=[objects],
@@ -76,11 +76,23 @@ class Env:
         self.reset_complete = False
         self.placed = False
         self.sim = SimpleNamespace(sim=PhysicsContext())
-    def reset(self, **kwargs):
+    def record_lifecycle(self, *event):
+        self.lifecycle.append(list(event))
+        (Path(output) / "fixture-lifecycle.json").write_text(json.dumps(self.lifecycle))
+    def reset(self, seed=None, **kwargs):
+        assert seed == 3 and self.eval_seed == 2
+        self.record_lifecycle("reset", seed, self.eval_seed)
         self.reset_complete = True
+    def set_origin_endpose(self):
+        assert self.placed, "Robot origin must follow saved placement"
+        self.record_lifecycle("origin")
+    def set_robot_init_state(self):
+        assert self.lifecycle[-1] == ["origin"], "Robot history must follow origin snapshot"
+        self.record_lifecycle("history")
     def apply_saved_poses(self, env_idx_list):
         assert self.reset_complete, "Saved poses must be applied after reset staging"
         assert env_idx_list == [0]
+        self.record_lifecycle("place", env_idx_list)
         if mode == "placement_failure":
             raise RuntimeError("deliberate task placement failure")
         if mode != "offscreen_not_restored":
@@ -100,6 +112,7 @@ class Obs:
         self.env = env
     def get_obs(self):
         assert self.env.placed, "Objects were left in reset offscreen staging"
+        assert self.env.lifecycle[-2:] == [["origin"], ["history"]], "Robot episode history not initialized"
         frame = fixture(self.env.sim.sim.frame)
         if mode == "escaped_mid_record":
             for obj in self.env.scene_manager._rigid_and_dynamic_objects[0].values():
@@ -111,17 +124,6 @@ class Obs:
 
 install("env.observation_manager.obs_manager", ObsManager=Obs)
 install("task.RoboDojo.task_registry", load_task_class=lambda task: (task, Env))
-
-def load_yaml(path):
-    if "/env_cfg/arx_x5" in str(path):
-        return {
-            "config": {key: "test" for key in ("sim", "scene", "camera", "robot")},
-            "observation": {"collect_freq":25, "multimodal": True},
-            "tactile": {"enabled": True},
-        }
-    return {"scene": {"num_envs":1}}
-
-install("utils.load_file", load_yaml=load_yaml)
 
 def visualize(path):
     raise RuntimeError("deliberate visualization failure")
@@ -137,8 +139,8 @@ def enable_extensions():
 compat.enable_legacy_isaacsim_extensions = enable_extensions
 layout_file = Path(output) / "test-layout.json"
 layout_file.write_text('{"Rigid":{"test_object":[{}]}}')
-sys.argv = ["collect_multimodal.py", "--frames", "1", "--warmup-steps", "0", "--output", output,
-            "--layout-file", str(layout_file)]
+sys.argv = ["collect_multimodal.py", "--task", "make_kong", "--frames", "1", "--warmup-steps", "0", "--output", output,
+            "--layout-file", str(layout_file), "--layout-id", "3", "--eval-seed", "2"]
 if mode == "visualization_failure":
     sys.argv.append("--visualize")
 runpy.run_path("reproduction/collect_multimodal.py", run_name="__main__")
@@ -168,6 +170,13 @@ class CollectorExitTests(unittest.TestCase):
             self.assertEqual(validation["scene_final"]["physics_frame"], validation["frames"][-1]["physics_frame"])
             self.assertLess(validation["scene_initial"]["physics_frame"], validation["scene_final"]["physics_frame"])
             self.assertEqual(validation["scene"]["live_placements"]["/World/test"]["world_center"], [0.1, 0.2, 0.8])
+            manifest = json.loads((Path(directory) / "manifest.json").read_text())
+            profile = manifest["run"]["runtime_profile"]
+            self.assertEqual(profile["canonical_task"], "make_kong")
+            self.assertEqual(profile["effective_components"]["robot"], "dual_x5_and_franka_competition")
+            self.assertEqual((profile["eval_seed"], profile["episode_seed"]), (2, 3))
+            lifecycle = json.loads((Path(directory) / "fixture-lifecycle.json").read_text())
+            self.assertEqual(lifecycle, [["reset", 3, 2], ["place", [0]], ["origin"], ["history"]])
 
     def test_missing_task_objects_never_produce_successful_recording(self):
         with tempfile.TemporaryDirectory() as directory:
