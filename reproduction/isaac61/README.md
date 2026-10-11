@@ -50,6 +50,15 @@ completed runtime checks. Rebuild the previews with:
 bash reproduction/isaac61/run.sh visualize reproduction/isaac61/outputs/multimodal-capture
 ```
 
+Capture and task smoke entrypoints apply the same task configuration as the
+production evaluator, including the conveyor and the extra Franka support arm
+for interactive tasks. The requested RGBD or multimodal camera profile remains
+selected unless the task explicitly overrides it. `--eval-seed` selects the
+actual layout/trajectory cohort (default `0`); `--layout-id` selects its episode
+and binds the matching episode seed. These settings and effective robot roles
+are recorded in the runtime profile. Use `--enable-planner` to initialize
+planners in a capture; sensor collection itself does not require them.
+
 | Location | Recorded fields |
 | --- | --- |
 | `head`, `left_wrist`, `right_wrist` | `rgb`, `depth_gt`, `depth_sl`, `ir_left`, `ir_right`, intrinsics and world camera poses |
@@ -98,8 +107,11 @@ bash reproduction/isaac61/run.sh python reproduction/isaac61/check_tasks.py
 ```
 
 The task suite starts one fresh process for each runnable task, initializes and
-resets its scene, steps physics and validates all three RGBD cameras. It does
-not measure policy success. `--tasks stack_bowls fold_clothes` selects a subset;
+resets its scene, steps physics and validates all three RGBD cameras. It also
+generates task instructions, executes every registered reward predicate and
+the normal reward manager step, and rejects known fatal native physics signals
+in the original process log. It does not measure policy success.
+`--tasks stack_bowls fold_clothes` selects a subset;
 `--resume` accepts prior evidence only for matching source contents, runtime
 and configuration. JSON reports, NPZ arrays, galleries and detailed logs are
 saved for reviewing actual runtime results. A failed GPU assertion exits
