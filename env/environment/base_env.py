@@ -215,6 +215,17 @@ class BaseEnv(gym.Env):
         from utils.legacy_prim_adapter import install_legacy_prim_adapter
 
         self._legacy_prim_manager, _ = install_legacy_prim_adapter()
+        if getattr(self, "_requires_surface_fabric_copy", False):
+            # Native GPU interop currently leaves renderer adjacency missing
+            # for surface FEM meshes. The supported CPU Fabric copy transport
+            # preserves CUDA PhysX/tensors while supplying actual render data.
+            previous_interop = sim.sim.get_setting("/physics/fabricUseGPUInterop")
+            if not isinstance(previous_interop, bool):
+                raise RuntimeError("Native Fabric GPU interop setting is unavailable")
+            self._surface_fabric_restore = (sim.sim, previous_interop)
+            sim.sim.set_setting("/physics/fabricUseGPUInterop", False)
+            sim.sim.set_setting("/isaaclab/robodojo/surface_fabric_cpu_copy", True)
+            print("[RoboDojo] Surface FEM: CUDA physics with native CPU Fabric renderer transport.")
         if getattr(self, "_requires_particle_readback", False):
             # PhysxCfg has no readback selector in 3.0 EA. Its manager enables
             # DirectGPU for every CUDA device during context construction.
@@ -241,8 +252,18 @@ class BaseEnv(gym.Env):
             print("[restart] timeline stop/set failed:", e)
 
         if self.sim is not None:
-            self.sim.close()
-            self.sim = None
+            try:
+                self.sim.close()
+            finally:
+                self.sim = None
+                restore = getattr(self, "_surface_fabric_restore", None)
+                if restore is not None:
+                    context, previous_interop = restore
+                    # Restore after teardown so a later rigid environment in
+                    # this Kit app retains the user's original transport.
+                    context.set_setting("/physics/fabricUseGPUInterop", previous_interop)
+                    context.set_setting("/isaaclab/robodojo/surface_fabric_cpu_copy", False)
+                    del self._surface_fabric_restore
 
         # Lab 3 already closes the attached USD stage after detaching PhysX.
         # Reset its thread-local authoring stage with the pure USD API, not

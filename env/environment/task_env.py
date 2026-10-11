@@ -21,6 +21,7 @@ class TaskEnv(BaseEnv):
         self._requires_particle_readback = bool(config.task_env.get("Fluid")) or bool(
             self.sim_config.get("particle_readback", False)
         )
+        self._requires_surface_fabric_copy = bool(config.task_env.get("Garment"))
         if self._requires_particle_readback and config.task_env.get("Garment"):
             raise NotImplementedError(
                 "PBD fluid host readback and surface deformable garment tensors require different PhysX pipelines; "

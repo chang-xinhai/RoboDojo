@@ -4,7 +4,8 @@ import ast
 from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 from typing import List, Literal
 
 import numpy as np
@@ -172,3 +173,65 @@ def test_particle_pipeline_selector_preserves_cuda_manager(requires_readback, mo
         assert settings["/isaaclab/robodojo/particle_readback"] is True
     else:
         assert settings == {}
+
+
+@pytest.mark.parametrize("original_interop", [False, True])
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_surface_cpu_fabric_transport_restores_original_setting_after_close(monkeypatch, original_interop, close_fails):
+    monkeypatch.setattr("utils.legacy_prim_adapter.install_legacy_prim_adapter", lambda: (object(), ()))
+    cls = load_class(
+        "env/environment/base_env.py",
+        "BaseEnv",
+        gym=SimpleNamespace(Env=object),
+        Any=object,
+        IsaacRLEnv=object,
+        get_physx_interface=lambda: object(),
+    )
+    calls = []
+    settings = {"/physics/fabricUseGPUInterop": original_interop}
+
+    def set_setting(name, value):
+        settings[name] = value
+        calls.append((name, value))
+
+    context = SimpleNamespace(
+        physics_manager=SimpleNamespace(device="cuda:0"),
+        get_setting=settings.get,
+        set_setting=set_setting,
+    )
+    instance = cls.__new__(cls)
+    instance._requires_surface_fabric_copy = True
+    instance.setup_physics(SimpleNamespace(sim=context))
+    assert instance.physics_context is context.physics_manager
+    assert settings["/physics/fabricUseGPUInterop"] is False
+    assert settings["/isaaclab/robodojo/surface_fabric_cpu_copy"] is True
+
+    def close():
+        calls.append(("close", None))
+        if close_fails:
+            raise RuntimeError("native close error")
+
+    instance.sim = SimpleNamespace(close=close)
+    for name in ("omni", "omni.timeline", "isaaclab", "isaaclab.sim", "isaaclab.sim.utils", "isaaclab.sim.utils.stage"):
+        monkeypatch.setitem(sys.modules, name, ModuleType(name))
+    sys.modules["omni"].timeline = sys.modules["omni.timeline"]
+    sys.modules["omni.timeline"].get_timeline_interface = lambda: SimpleNamespace(
+        stop=lambda: None, set_current_time=lambda value: None
+    )
+    sys.modules["isaaclab.sim.utils.stage"].create_new_stage = lambda: calls.append(("new_stage", None))
+    if close_fails:
+        with pytest.raises(RuntimeError, match="native close error"):
+            instance.close()
+    else:
+        instance.close()
+    assert instance.sim is None
+    assert settings["/physics/fabricUseGPUInterop"] is original_interop
+    assert settings["/isaaclab/robodojo/surface_fabric_cpu_copy"] is False
+    assert calls.index(("close", None)) < len(calls) - 1
+    assert not hasattr(instance, "_surface_fabric_restore")
+    # A later ordinary context neither overrides the restored user value nor
+    # inherits the garment-specific provenance marker as active.
+    next_env = cls.__new__(cls)
+    next_env.setup_physics(SimpleNamespace(sim=context))
+    assert settings["/physics/fabricUseGPUInterop"] is original_interop
+    assert not hasattr(next_env, "_surface_fabric_restore")
