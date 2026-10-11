@@ -271,6 +271,12 @@ def export_episode_video(
                 raise ValueError("Full-episode video requires a completed recording; partial recordings are refused")
             if reader.handle.attrs["observation_schema"] != SCHEMA_VERSION:
                 raise ValueError("Task video requires three RGB cameras and bilateral TacSL, not component data")
+            if require_nslv2:
+                run = reader.metadata["run"]
+                if run.get("scope") == "keyframe_subset_commissioning" or run.get("source_capture", {}).get(
+                    "frames", len(reader)
+                ) != len(reader):
+                    raise ValueError("A full NSLv2 task video cannot use a commissioning subset of its source episode")
             first, last, interval = _timeline(reader)
             fps = 1e9 / interval
             contact_counts = {f"{side}.{finger}": 0 for side, finger in PADS}

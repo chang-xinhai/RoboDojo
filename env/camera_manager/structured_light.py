@@ -3,7 +3,8 @@
 The IR streams combine each independent eye's passive exposure with linear
 HDR projector-on/off response and a declared electron/ADC model. RTX is a visible-spectrum renderer:
 this is an explicitly tagged IR illumination proxy, not spectral NIR transport.
-``depth_gt`` is renderer ground truth; ``depth_sl`` is triangulated stereo depth.
+``depth_gt`` is renderer ground truth; new ``depth_sl`` capture uses NSLv2
+learned stereo inference on the original left/right IR, in left optical metres.
 """
 
 from __future__ import annotations
@@ -76,6 +77,43 @@ def active_ir(on, off, saturation_radiance):
     radiance = np.maximum(on[..., :3] - off[..., :3], 0).mean(axis=-1)
     radiance = np.nan_to_num(radiance, nan=0, posinf=saturation_radiance, neginf=0)
     return np.rint(np.clip(radiance / saturation_radiance, 0, 1) * 255).astype(np.uint8)
+
+
+def create_nslv2_client(config):
+    """New runtime captures require NSLv2; no classical-stereo fallback."""
+    if config.get("backend", "nsl_v2") != "nsl_v2":
+        raise ValueError("Structured-light runtime depth requires backend=nsl_v2")
+    from reproduction.isaac61.nslv2.client import NSLv2Client
+
+    return NSLv2Client.from_config(dict(config.get("nsl_v2", {})))
+
+
+def infer_nslv2_depth(client, left, right, *, fx_px, baseline_m, stamp_ns, frame_index, camera):
+    """Infer original-resolution left optical depth with actual rig calibration.
+
+    No renderer depth, RGB image, texture matching or depth filling enters this
+    path. The isolated client checks model identity and delivers NaN invalids.
+    """
+    if left.dtype != np.uint8 or right.dtype != np.uint8 or left.ndim != 2 or right.shape != left.shape:
+        raise ValueError("NSLv2 runtime input must be equally sized native uint8 stereo IR")
+    if not left.size or not np.isfinite(fx_px) or fx_px <= 0 or not np.isfinite(baseline_m) or baseline_m <= 0:
+        raise ValueError("NSLv2 runtime requires nonempty IR and positive actual fx/baseline")
+    response = client.infer(
+        left.copy(),
+        right.copy(),
+        fx_px=float(fx_px),
+        baseline_m=float(baseline_m),
+        stamp_ns=int(stamp_ns),
+        frame_index=int(frame_index),
+        camera=str(camera),
+    )
+    depth = np.asarray(response.depth_left_m)
+    if depth.shape != left.shape or depth.dtype != np.float32:
+        raise ValueError("NSLv2 must deliver native IR-left resolution float32 metric depth")
+    if not (np.isnan(depth) | (np.isfinite(depth) & (depth > 0))).all():
+        raise ValueError("NSLv2 output must contain positive metric depth or declared NaN invalids")
+    provenance = dict(response.provenance)
+    return depth.copy(), provenance
 
 
 def reconstruct_stereo(
@@ -248,6 +286,9 @@ class StructuredLightCapture:
     """One mounted stereo/projector rig per existing RoboDojo RGB camera."""
 
     def __init__(self, manager, config):
+        if config.get("backend", "nsl_v2") != "nsl_v2":
+            raise ValueError("Structured-light capture requires the nsl_v2 backend; no fallback is supported")
+        self.depth_client = None
         CameraAuthoring, CameraSensor, RtxCamera = _load_native_camera_types()
         from isaacsim.core.utils.stage import get_current_stage
         import omni.replicator.core as rep
@@ -354,6 +395,13 @@ class StructuredLightCapture:
             for sensor in (rig["rgb"], *rig["eyes"].values())
         ]
         self._delivery_fence = RenderProductDeliveryFence(sensors)
+        # Acquire only after camera authoring succeeds. A model startup failure
+        # must release the authored render products as well as its worker.
+        try:
+            self.depth_client = create_nslv2_client(config)
+        except BaseException:
+            self.destroy()
+            raise
 
     def set_projectors(self, enabled, *, env_id=None, camera_name=None):
         from pxr import UsdGeom
@@ -608,21 +656,25 @@ class StructuredLightCapture:
                     k, models["ir_right"]["K"], atol=1e-3, rtol=0
                 ):
                     raise RuntimeError("Rendered stereo pair is not parallel with the configured horizontal baseline")
-                confidence = {
-                    key: float(self.config.get("stereo_confidence", {}).get(key, default))
-                    for key, default in (
-                        ("lr_max_diff_px", 0.5),
-                        ("min_texture_std_dn", 2.0),
-                        ("min_patch_correlation", 0.5),
-                    )
-                }
-                depth_sl = reconstruct_stereo(
+                # Use the delivered left intrinsics and the independently
+                # measured stereo transform, rather than a nominal RGB focal
+                # value or an assumed baseline copied from a different station.
+                native_sim = self.manager.sim.sim
+                frame_index = (
+                    native_sim.get_physics_step_count()
+                    if hasattr(native_sim, "get_physics_step_count")
+                    else native_sim.current_time_step_index
+                )
+                actual_baseline = float(relative[0, 3])
+                depth_sl, nslv2_provenance = infer_nslv2_depth(
+                    self.depth_client,
                     ir["ir_left"],
                     ir["ir_right"],
-                    k[0, 0],
-                    self.baseline,
-                    max_disparity=int(self.config.get("max_disparity", 128)),
-                    **confidence,
+                    fx_px=k[0, 0],
+                    baseline_m=actual_baseline,
+                    stamp_ns=timestamp_ns,
+                    frame_index=frame_index,
+                    camera=name,
                 )
                 transforms = {view: model["T_world_from_optical"] for view, model in models.items()}
                 result[name] = dict(
@@ -643,12 +695,17 @@ class StructuredLightCapture:
                         camera_projection_row_major={
                             view: model["projection_row_major"].tolist() for view, model in models.items()
                         },
-                        baseline_m=self.baseline,
+                        baseline_m=actual_baseline,
+                        configured_baseline_m=self.baseline,
                         T_world_from_optical={k: v.tolist() for k, v in transforms.items()},
                         depth_gt_frame="rgb",
                         depth_sl_frame="ir_left",
                         depth_unit="m",
-                        stereo_confidence={**confidence, "texture_window_px": 5, "valid_depth_range_m": [0.05, 10.0]},
+                        depth_sl_backend="nsl_v2",
+                        depth_sl_dtype="float32",
+                        depth_sl_resolution_hw=list(depth_sl.shape),
+                        depth_sl_invalid="NaN",
+                        depth_sl_registration="native_ir_left_optical_Z; not registered to RGB",
                     ),
                     provenance=dict(
                         ir="independent_eye_ambient_plus_active_hdr_electron_adc_proxy"
@@ -661,13 +718,9 @@ class StructuredLightCapture:
                         },
                         ir_spectral_model="visible_radiance_proxy_no_NIR_material_response",
                         depth_gt="distance_to_image_plane_ground_truth",
-                        depth_sl="rectified_active_stereo_sgbm_triangulation",
-                        stereo_confidence={
-                            **confidence,
-                            "method": "independent_reverse_sgbm_bilinear_consistency_texture_and_normalized_patch_correlation",
-                            "texture_window_px": 5,
-                            "rejected_matches": "NaN; no GT filtering or filling",
-                        },
+                        depth_sl="nsl_v2_learned_metric_depth",
+                        depth_sl_method="nsl_v2",
+                        nslv2=nslv2_provenance,
                         pattern=self.pattern,
                         pattern_sha256=self.pattern_sha256,
                         direction_texture=self.direction_texture,
@@ -697,15 +750,20 @@ class StructuredLightCapture:
             self.set_projectors(False)
 
     def destroy(self):
-        self.set_projectors(False)
-        self._delivery_fence.close()
-        for rigs in self.rigs.values():
-            for rig in rigs.values():
-                for annotator in rig["hdr"].values():
-                    annotator.detach()
-                for annotator in rig["params"].values():
-                    annotator.detach()
-                for sensor in (rig["rgb"], *rig["eyes"].values()):
-                    sensor.detach_annotators(sensor.annotators)
-                    sensor._hydra_texture.destroy()
-        self.rigs.clear()
+        try:
+            self.set_projectors(False)
+            self._delivery_fence.close()
+            for rigs in self.rigs.values():
+                for rig in rigs.values():
+                    for annotator in rig["hdr"].values():
+                        annotator.detach()
+                    for annotator in rig["params"].values():
+                        annotator.detach()
+                    for sensor in (rig["rgb"], *rig["eyes"].values()):
+                        sensor.detach_annotators(sensor.annotators)
+                        sensor._hydra_texture.destroy()
+            self.rigs.clear()
+        finally:
+            if self.depth_client is not None:
+                self.depth_client.close()
+                self.depth_client = None

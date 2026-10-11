@@ -2,6 +2,18 @@
 default_frequency: 30
 structured_light:
   enabled: true
+  backend: nsl_v2
+  nsl_v2:
+    # Isolated model worker: original IR goes to NSLv2 with each real rig's
+    # focal length/baseline. Service failures stop capture; no SGBM fallback.
+    python_executable: /home/zktitan/miniconda3/envs/nslv2/bin/python
+    model_root: /home/zktitan/projects/DepthUMI/third_party/nslv2
+    weights_path: /home/zktitan/projects/DepthUMI/third_party/nslv2/ufm_1.8b_psv_step_00250000.pt
+    config_path: /home/zktitan/projects/DepthUMI/third_party/nslv2/config.yaml
+    device: cuda:0
+    precision: mixed
+    preprocess_mode: resize
+    confidence_threshold: null
   baseline_m: 0.05
   pattern_seed: 7
   # Exact supplied pattern used by the read-only DepthUMI reference workflow.
@@ -19,13 +31,6 @@ structured_light:
   saturation_radiance: 5500.0
   settle_render_passes: 5
   max_render_passes: 32
-  max_disparity: 128
-  stereo_confidence:
-    # Reject independent reverse-disparity disagreement and weak IR texture.
-    # Confidence uses IR only; rejected depth remains NaN.
-    lr_max_diff_px: 0.5
-    min_texture_std_dn: 2.0
-    min_patch_correlation: 0.5
   rendering:
     # Native-resolution DLAA for projector-off RGB, spatial FXAA for IR.
     # Settings are scoped and restored after every frozen capture phase.

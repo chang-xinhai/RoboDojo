@@ -112,6 +112,27 @@ class EpisodeVideoTests(unittest.TestCase):
             self.assertFalse(video.with_suffix(".json").exists())
             self.assertFalse(video.with_name("unified.partial.mp4").exists())
 
+    def test_required_nslv2_refuses_a_completed_commissioning_subset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            with HDF5Writer(
+                directory / "subset",
+                {
+                    "synthetic_cpu_fixture": True,
+                    "scope": "keyframe_subset_commissioning",
+                    "source_capture": {"frames": 1228},
+                },
+            ) as writer:
+                for index in range(2):
+                    frame = contact_fixture(False, index + 1)
+                    for camera in frame["vision"].values():
+                        camera["provenance"]["depth_sl_method"] = "nsl_v2"
+                    writer.append(frame)
+            video = directory / "unified.mp4"
+            with self.assertRaisesRegex(ValueError, "commissioning subset"):
+                export_episode_video(writer.path, video, width=1000, layout="unified", require_nslv2=True)
+            self.assertFalse(video.exists())
+
     def test_continuous_gel_survives_idle_contact_and_release_without_mutating_source(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
