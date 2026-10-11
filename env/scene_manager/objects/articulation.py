@@ -58,6 +58,9 @@ class ArticulationObject(SingleArticulation):
         self.instance_config = inst_config
         self.visual_cfg = self.instance_config.get("visual", {})
         self.physics_cfg = self.instance_config.get("physics", {})
+        self._drive_targets_captured = False
+        self._joint_positions_captured = False
+        self.initial_drive_targets = None
         self.env_origin = env_origin
         self.physics_cfg = self._apply_physics_ratio_randomization(self.physics_cfg)
         self.usd_prim_path = prim_path
@@ -259,8 +262,14 @@ class ArticulationObject(SingleArticulation):
             raise ValueError(f"Unexpected native articulation limit shape for {self._prim_path}: {limits.shape}")
         self.lower_joint_positions = limits[0, :, 0].copy()
         self.upper_joint_positions = limits[0, :, 1].copy()
-        self.initial_joint_positions = self.get_current_joint_positions()
-        self.initial_drive_targets = self._capture_drive_targets()
+        if not self._joint_positions_captured:
+            self.initial_joint_positions = self._clone_native_joint_buffer(
+                self.get_current_joint_positions(), "joint positions", (self.num_dof,)
+            )
+            self._joint_positions_captured = True
+        if self.physics_cfg.get("reset_drive", False) and not self._drive_targets_captured:
+            self.initial_drive_targets = self._capture_drive_targets()
+            self._drive_targets_captured = True
         self.app = omni.kit.app.get_app()
         self.app.update()
 
@@ -270,6 +279,7 @@ class ArticulationObject(SingleArticulation):
     def set_current_joint_positions(self, positions):
         if not isinstance(positions, torch.Tensor):
             positions = torch.tensor(positions, dtype=torch.float32)
+        positions = self._clone_native_joint_buffer(positions, "joint positions", (self.num_dof,))
         self.set_joint_positions(positions)
 
     def _extract_env_id_from_prim_path(self):
@@ -396,56 +406,44 @@ class ArticulationObject(SingleArticulation):
         pose = np.concatenate([pos_world, quat_wxyz], axis=0)
         return pose
 
-    def _get_joint_drive_type(self, joint_prim) -> str:
-        """Infer the DriveAPI token ('linear' or 'angular') for a joint prim."""
-        if joint_prim.IsA(UsdPhysics.PrismaticJoint):
-            return "linear"
-        if joint_prim.IsA(UsdPhysics.RevoluteJoint):
-            return "angular"
-        for drive_type in ("linear", "angular"):
-            if joint_prim.HasAPI(UsdPhysics.DriveAPI, drive_type):
-                return drive_type
-        return "linear"
+    def _clone_native_joint_buffer(self, values, name, expected_shape):
+        """Keep native units/device and reject unavailable or invalid state."""
+        if values is None:
+            raise RuntimeError(f"Native articulation {name} are unavailable: {self._prim_path}")
+        if not isinstance(values, (torch.Tensor, np.ndarray)):
+            raise TypeError(f"Unsupported native {name} buffer: {type(values)}")
+        if tuple(values.shape) != expected_shape:
+            raise ValueError(f"Unexpected native {name} shape: {values.shape}; expected {expected_shape}")
+        if isinstance(values, torch.Tensor):
+            if not torch.is_floating_point(values) or not bool(torch.isfinite(values).all()):
+                raise ValueError(f"Native {name} must contain finite floating-point values")
+            return values.detach().clone()
+        if not np.issubdtype(values.dtype, np.floating) or not np.isfinite(values).all():
+            raise ValueError(f"Native {name} must contain finite floating-point values")
+        return values.copy()
 
-    def _iter_drive_joint_prims(self):
-        """Yield (joint_prim, drive_type) for every joint with a DriveAPI."""
-        root_prim = get_prim_at_path(self._prim_path)
-        if root_prim is None or not root_prim.IsValid():
-            raise ValueError(f"Invalid articulation root path: {self._prim_path}")
+    def _clone_native_drive_targets(self, targets):
+        return self._clone_native_joint_buffer(targets, "drive targets", (1, self.num_dof))
 
-        for prim in Usd.PrimRange(root_prim):
-            if not (
-                prim.IsA(UsdPhysics.PrismaticJoint) or prim.IsA(UsdPhysics.RevoluteJoint) or prim.IsA(UsdPhysics.Joint)
-            ):
-                continue
-            drive_type = self._get_joint_drive_type(prim)
-            if prim.HasAPI(UsdPhysics.DriveAPI, drive_type):
-                yield prim, drive_type
+    def _capture_drive_targets(self):
+        """Capture actual native motor targets once, before initialize's app update.
 
-    def _capture_drive_targets(self) -> dict:
-        """Snapshot the current drive target position of every drivable joint."""
-        targets = {}
-        for joint_prim, drive_type in self._iter_drive_joint_prims():
-            drive_api = UsdPhysics.DriveAPI.Get(joint_prim, drive_type)
-            target_attr = drive_api.GetTargetPositionAttr()
-            if target_attr:
-                targets[joint_prim.GetPath().pathString] = target_attr.Get()
-        return targets
+        Native targets already use radians/metres. They are distinct from joint
+        positions and must survive repeated SceneManager.post_init calls.
+        """
+        actions = self._articulation_view.get_applied_actions(clone=True)
+        if actions is None:
+            raise RuntimeError(f"Native articulation drive actions are unavailable: {self._prim_path}")
+        return self._clone_native_drive_targets(actions.joint_positions)
 
     def reset_drive_targets(self):
-        """Reset every joint's DriveAPI target position back to its initial value."""
-        for path, value in self.initial_drive_targets.items():
-            joint_prim = get_prim_at_path(path)
-            if joint_prim is None or not joint_prim.IsValid():
-                continue
-            drive_type = self._get_joint_drive_type(joint_prim)
-            drive_api = UsdPhysics.DriveAPI.Get(joint_prim, drive_type)
-            if not drive_api:
-                continue
-            target_attr = drive_api.GetTargetPositionAttr()
-            if not target_attr:
-                target_attr = drive_api.CreateTargetPositionAttr()
-            target_attr.Set(value)
+        """Restore native motor targets without authoring post-attach USD drives."""
+        if not self.physics_cfg.get("reset_drive", False):
+            return
+        if not self._drive_targets_captured:
+            raise RuntimeError(f"Native drive reset requires an initialized snapshot: {self._prim_path}")
+        targets = self._clone_native_drive_targets(self.initial_drive_targets)
+        self._articulation_view.set_joint_position_targets(targets)
 
     def get_joint_info(self, joint_name: str = "button_joint"):
         if joint_name not in self.dof_names:
