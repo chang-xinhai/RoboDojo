@@ -6,7 +6,15 @@ from types import SimpleNamespace
 from PIL import Image
 import pytest
 
-from scripts.build_sensor_quality_report import build, bundle, control_evidence, fingerprint, read_json, source_status
+from scripts.build_sensor_quality_report import (
+    build,
+    bundle,
+    capture_viewer,
+    control_evidence,
+    fingerprint,
+    read_json,
+    source_status,
+)
 from tests.test_acceptance_report import hdf5_recording
 
 
@@ -386,3 +394,236 @@ def test_integer_component_preview_cannot_label_full_camera_hdf5_as_component(tm
     _, declaration = audited_component_preview(tmp_path / "component")
     with HDF5Reader(full) as reader, pytest.raises(ValueError, match="actual tactile component HDF5"):
         component_preview(reader, declaration)
+
+
+def audited_offline_viewer(tmp_path):
+    """Real typed two-frame HDF5 plus six lossless fixture views and a real MP4."""
+    import base64
+    import io
+
+    import h5py
+    import numpy as np
+
+    from reproduction.visualize_multimodal import MODES, _score, mosaic
+    from utils.multimodal import json_value
+    from utils.multimodal_hdf5 import HDF5Reader
+    from utils.save_file import VideoStreamWriter
+
+    source = audited_capture(tmp_path / "capture")
+    with h5py.File(source, "r+") as handle:
+        handle["frames/00000001/tactile/left/finger_0/normal_force"][:] = 0.2
+    audit_path = source.parent / "independent-frame-audit.json"
+    audit = json.loads(audit_path.read_text())
+    audit["source_hdf5_sha256"] = fingerprint(source)
+    write_json(audit_path, audit)
+    viewer = tmp_path / "offline-viewer"
+    viewer.mkdir()
+    chunks = []
+    writer = VideoStreamWriter(str(viewer / "multimodal.mp4"), 1108, 1400, 3, fps=25)
+    with HDF5Reader(source) as reader:
+        selected = None
+        for index in range(len(reader)):
+            frame = reader.read_frame(index)
+            views = {}
+            for mode in MODES:
+                picture = mosaic(frame, mode=mode)
+                stream = io.BytesIO()
+                picture.save(stream, format="PNG")
+                views[mode] = "data:image/png;base64," + base64.b64encode(stream.getvalue()).decode()
+                if mode == "rgb":
+                    writer.append(np.asarray(picture))
+                    if index == 1:
+                        picture.save(viewer / "multimodal.png")
+            details = {
+                "sync": frame["sync"],
+                "vision": {
+                    name: {key: data[key] for key in ("calibration", "provenance")}
+                    for name, data in frame["vision"].items()
+                },
+                "tactile": {
+                    side: {
+                        finger: {key: data.get(key) for key in ("metadata", "provenance")}
+                        for finger, data in fingers.items()
+                    }
+                    for side, fingers in frame["tactile"].items()
+                },
+            }
+            chunks.append({"views": views, "details": json_value(details)})
+            if index == 1:
+                score, semantics = _score(frame)
+                selected = {"index": index, **frame["sync"], "score": score, "score_semantics": semantics}
+    writer.close(announce=False)
+    controller = (
+        'const selectedPreviewIndex=1;const initialTactileMode="rgb";'
+        "function show(){return frames[i].views[mode.value]};slider.oninput=show;mode.onchange=show;"
+    )
+    html = "<html><script>const frames=[];</script>"
+    html += "".join("<script>frames.push(" + json.dumps(row) + ");</script>" for row in chunks)
+    html += "<script>" + controller + "</script></html>"
+    (viewer / "multimodal.html").write_text(html)
+    visualization = {
+        "source_hdf5": str(source),
+        "source_hdf5_sha256": fingerprint(source),
+        "source_format": "hdf5",
+        "frames": 2,
+        "selected_frame": selected,
+        "png": str(viewer / "multimodal.png"),
+        "video": str(viewer / "multimodal.mp4"),
+        "html": str(viewer / "multimodal.html"),
+        "tactile_display_mode": "rgb",
+        "depth_range_m": [0.1, 2.5],
+        "optical_delta_range_m": [-0.002, 0.002],
+    }
+    original = {
+        key: value
+        for key, value in visualization.items()
+        if key in ("source_hdf5", "source_hdf5_sha256", "selected_frame")
+    }
+    original["legacy_preview_marker"] = "original-unaltered"
+    write_json(source.parent / "visualization.json", original)
+    write_json(viewer / "visualization.json", visualization)
+    write_json(
+        viewer / "offline-generation-receipt.json",
+        {
+            "status": "passed",
+            "fixture_not_runtime": True,
+            "offline_export": True,
+            "simulation_rerun": False,
+            "cpu_process_return_code": 0,
+            "source_hdf5": str(source),
+            "source_hdf5_sha256_before": fingerprint(source),
+            "source_hdf5_sha256_after": fingerprint(source),
+            "frame_stride": 1,
+            "max_frames": None,
+        },
+    )
+    return source, viewer, original
+
+
+def test_separate_offline_viewer_preserves_original_capture_and_uses_verified_new_assets(tmp_path):
+    source, viewer, original = audited_offline_viewer(tmp_path)
+    ref = reference(tmp_path / "reference")
+    capture_original = {
+        name: (source.parent / name).read_bytes()
+        for name in (
+            "episode.hdf5",
+            "manifest.json",
+            "validation.json",
+            "visualization.json",
+            "independent-frame-audit.json",
+        )
+    }
+    args = SimpleNamespace(
+        reference_dir=ref,
+        capture_dir=source.parent,
+        tactile_dir=source.parent,
+        baseline_dir=tmp_path / "none",
+        capture_viewer_dir=viewer,
+        output=tmp_path / "report",
+        copy_videos=True,
+    )
+    result = build(args)
+    capture = result["evidence"]["capture"]
+    assert capture["visualization"] == original
+    offline = capture["offline_viewer"]
+    assert offline["status"] == "passed" and offline["frame_count"] == 2
+    assert offline["script_blocks"] == 4 and len(offline["verified_files"]) == 3
+    assert offline["png_pixel_lineage_verified"] is True
+    page = (args.output / "index.html").read_text()
+    assert (viewer / "multimodal.html").as_uri() in page
+    assert "SL depth is sparse" in page and "remain NaN" in page
+    assert all((source.parent / name).read_bytes() == raw for name, raw in capture_original.items())
+
+
+@pytest.mark.parametrize(
+    "damage", ["different_path", "digest", "truncated", "clock", "score", "wrong_mode", "asset_outside"]
+)
+def test_offline_viewer_rejects_wrong_source_inventory_and_selection(tmp_path, damage):
+    source, viewer, _ = audited_offline_viewer(tmp_path)
+    path = viewer / "visualization.json"
+    visualization = json.loads(path.read_text())
+    if damage == "different_path":
+        clone = tmp_path / "same-bytes-foreign-source.hdf5"
+        clone.write_bytes(source.read_bytes())
+        visualization["source_hdf5"] = str(clone)
+    elif damage == "digest":
+        visualization["source_hdf5_sha256"] = "0" * 64
+    elif damage == "truncated":
+        visualization["frames"] = 1
+    elif damage == "clock":
+        visualization["selected_frame"]["timestamp_ns"] += 1
+    elif damage == "score":
+        visualization["selected_frame"]["score"] = 0.0
+    elif damage == "wrong_mode":
+        visualization["tactile_display_mode"] = "imagined_markers"
+    else:
+        foreign = tmp_path / "foreign.png"
+        foreign.write_bytes((viewer / "multimodal.png").read_bytes())
+        visualization["png"] = str(foreign)
+    write_json(path, visualization)
+    with pytest.raises(ValueError, match="Offline|outside"):
+        capture_viewer(viewer, bundle(source.parent, "capture", []), [])
+
+
+@pytest.mark.parametrize("damage", ["missing_chunk", "wrong_chunk_clock", "png_pixels", "generation_hash"])
+def test_offline_viewer_checks_actual_chunks_pixels_and_generation_receipt(tmp_path, damage):
+    source, viewer, _ = audited_offline_viewer(tmp_path)
+    if damage == "generation_hash":
+        path = viewer / "offline-generation-receipt.json"
+        receipt = json.loads(path.read_text())
+        receipt["source_hdf5_sha256_after"] = "0" * 64
+        write_json(path, receipt)
+    else:
+        path = viewer / "multimodal.html"
+        text = path.read_text()
+        if damage == "missing_chunk":
+            start = text.index("<script>frames.push(")
+            end = text.index("</script>", start) + len("</script>")
+            text = text[:start] + text[end:]
+        elif damage == "wrong_chunk_clock":
+            text = text.replace('"timestamp_ns": 40000000', '"timestamp_ns": 123', 1)
+        else:
+            import base64
+            import io
+
+            start = text.index('"rgb": "data:image/png;base64,') + len('"rgb": "data:image/png;base64,')
+            end = text.index('"', start)
+            stream = io.BytesIO()
+            Image.new("RGB", (1400, 1108), "red").save(stream, format="PNG")
+            text = text[:start] + base64.b64encode(stream.getvalue()).decode() + text[end:]
+        path.write_text(text)
+    with pytest.raises(ValueError, match="Offline"):
+        capture_viewer(viewer, bundle(source.parent, "capture", []), [])
+
+
+def test_frozen_rgb_control_displays_its_real_before_after_image_and_rgb_label(tmp_path):
+    source = audited_capture(tmp_path / "capture")
+    ref = reference(tmp_path / "reference")
+    control = tmp_path / "frozen-control"
+    control.mkdir()
+    write_json(control / "report.json", {"passed": True, "same_physics_state": True, "fixture_not_runtime": True})
+    raw = control / "frame.npz"
+    raw.write_bytes(b"fixture hash target")
+    Image.new("RGB", (4, 4), "green").save(control / "rgb-before-after.png")
+    write_json(
+        control / "independent-audit.json",
+        {
+            "status": "passed",
+            "frame_count": 1,
+            "source_report_sha256": fingerprint(control / "report.json"),
+            "source_files": [{"file": raw.name, "sha256": fingerprint(raw)}],
+        },
+    )
+    args = SimpleNamespace(
+        reference_dir=ref,
+        capture_dir=source.parent,
+        tactile_dir=source.parent,
+        baseline_dir=tmp_path / "none",
+        sl_dir=[control],
+        output=tmp_path / "report",
+        copy_videos=False,
+    )
+    result = build(args)
+    page = (args.output / "index.html").read_text()
+    assert "Frozen-state RGB control" in page
+    assert any(item.get("path") == str(control / "rgb-before-after.png") for item in result["inputs"])

@@ -9,16 +9,21 @@ import base64
 from datetime import UTC, datetime
 import hashlib
 import html
+from html.parser import HTMLParser
+import io
 import json
 import math
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASELINE = ROOT / "reproduction/isaac61/outputs/moving-wrists-61-v5-final"
 LIMITATIONS = [
     "IR is an RTX visible-radiance proxy, not a full NIR spectral/material simulation.",
+    "SL depth is sparse: invalid/confidence-rejected pixels remain NaN. There is no ground-truth filling, "
+    "and passed controls do not establish dense or universal coverage.",
     "IsaacLab TacSL uses its optical/penalty contact model; it is not UniVTAC UIPC or a marker-tracking sensor.",
     "A contact sequence can establish sensor response; it does not establish policy success or task completion.",
     "Reference videos are qualitative comparisons with different scenes, cameras and sensor models.",
@@ -451,6 +456,238 @@ def control_evidence(directory, inputs):
     }
 
 
+def capture_viewer(directory, capture, inputs):
+    """Verify a separate offline export without rewriting native capture evidence."""
+    import numpy as np
+    from PIL import Image
+
+    from reproduction.visualize_multimodal import MODES, _score, mosaic
+    from utils.multimodal import json_value
+    from utils.multimodal_hdf5 import HDF5Reader
+
+    directory = directory.resolve(strict=True)
+    native = capture.get("hdf5_validation") or {}
+    source = Path(native.get("source_hdf5", "")).resolve(strict=True)
+    digest = native.get("source_hdf5_sha256")
+    visualization = read_json(directory / "visualization.json", inputs)
+    source_claim = visualization.get("source_hdf5")
+    if (
+        not isinstance(source_claim, str)
+        or not Path(source_claim).is_absolute()
+        or Path(source_claim).resolve(strict=True) != source
+        or visualization.get("source_hdf5_sha256") != digest
+    ):
+        raise ValueError("Offline viewer must name the exact verified native HDF5 path/SHA256")
+    checked_hash(source, digest)
+    receipt_path = next(
+        (
+            directory / name
+            for name in ("offline-generation-receipt.json", "candidate-generation-receipt.json")
+            if (directory / name).is_file()
+        ),
+        None,
+    )
+    if receipt_path is None:
+        raise ValueError("Offline viewer requires its separate generation receipt")
+    receipt = read_json(receipt_path, inputs)
+    if (
+        source_status(receipt) != "passed"
+        or receipt.get("offline_export") is not True
+        or receipt.get("simulation_rerun") is not False
+        or isinstance(receipt.get("cpu_process_return_code"), bool)
+        or not isinstance(receipt.get("cpu_process_return_code"), int)
+        or receipt.get("cpu_process_return_code") != 0
+        or receipt.get("source_hdf5") != str(source)
+        or receipt.get("source_hdf5_sha256_before") != digest
+        or receipt.get("source_hdf5_sha256_after") != digest
+        or isinstance(receipt.get("frame_stride"), bool)
+        or not isinstance(receipt.get("frame_stride"), int)
+        or receipt.get("frame_stride") != 1
+        or receipt.get("max_frames") is not None
+    ):
+        raise ValueError("Offline generation receipt is not a complete unchanged-source export")
+    paths = {kind: local_file(visualization.get(kind), directory) for kind in ("png", "video", "html")}
+    files = [{"kind": kind, "path": str(path), "sha256": fingerprint(path)} for kind, path in paths.items()]
+    inputs.extend({**item, "kind": "offline_viewer_" + item["kind"]} for item in files)
+    depth_range = visualization.get("depth_range_m")
+    delta_range = visualization.get("optical_delta_range_m")
+    mode = visualization.get("tactile_display_mode")
+    if (
+        not isinstance(depth_range, list)
+        or len(depth_range) != 2
+        or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in depth_range)
+        or not 0 <= depth_range[0] < depth_range[1]
+        or not isinstance(delta_range, list)
+        or len(delta_range) != 2
+        or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in delta_range)
+        or not delta_range[0] < 0 < delta_range[1]
+        or delta_range[0] != -delta_range[1]
+        or mode not in MODES
+    ):
+        raise ValueError("Offline viewer must declare finite display ranges and a supported mode")
+    selected = visualization.get("selected_frame")
+    if not isinstance(selected, dict):
+        raise ValueError("Offline viewer must retain its actual selected frame/score")
+    index = selected.get("index")
+    with HDF5Reader(source) as reader:
+        if (
+            visualization.get("source_format") != "hdf5"
+            or isinstance(visualization.get("frames"), bool)
+            or not isinstance(visualization.get("frames"), int)
+            or visualization.get("frames") != len(reader)
+            or len(reader) != capture["frame_count"]
+            or isinstance(index, bool)
+            or not isinstance(index, int)
+            or not 0 <= index < len(reader)
+        ):
+            raise ValueError("Offline viewer must include the complete original HDF5 frame inventory")
+        if any(selected.get(key) != value for key, value in reader.sync(index).items()):
+            raise ValueError("Offline viewer selected-frame clock differs from native HDF5")
+        selected_score, semantics = _score(reader.read_frame(index))
+        if (
+            not isinstance(selected.get("score"), (int, float))
+            or isinstance(selected.get("score"), bool)
+            or not math.isclose(selected["score"], selected_score, rel_tol=1e-7, abs_tol=1e-12)
+            or selected.get("score_semantics") != semantics
+        ):
+            raise ValueError("Offline viewer selected-frame score/units differ from native HDF5")
+
+        class Inventory(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.in_script = False
+                self.parts = []
+                self.rows = []
+                self.scripts = 0
+                self.max_script_bytes = 0
+                self.best_score = -1.0
+                self.selected_png_sha256 = None
+                self.bootstrap = False
+                self.controller = ""
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "script":
+                    self.in_script, self.parts = True, []
+
+            def handle_data(self, text):
+                if self.in_script:
+                    self.parts.append(text)
+
+            def handle_endtag(self, tag):
+                if tag != "script":
+                    return
+                self.in_script = False
+                code = "".join(self.parts)
+                self.parts = []
+                self.scripts += 1
+                self.max_script_bytes = max(self.max_script_bytes, len(code.encode()))
+                if self.max_script_bytes >= 536_870_888:
+                    raise ValueError("Offline viewer script exceeds the V8 string limit")
+                if code.strip() == "const frames=[];":
+                    self.bootstrap = True
+                    return
+                if not code.startswith("frames.push("):
+                    self.controller = code
+                    return
+                if not code.endswith(");") or len(self.rows) >= len(reader):
+                    raise ValueError("Malformed/excess offline viewer frame chunks")
+                chunk = json.loads(code[len("frames.push(") : -2], parse_constant=reject_constant)
+                frame_index = len(self.rows)
+                frame = reader.read_frame(frame_index)
+                if chunk.get("details", {}).get("sync") != frame["sync"]:
+                    raise ValueError("Offline viewer chunk clock differs from its original HDF5 frame")
+                expected_details = {
+                    "sync": frame["sync"],
+                    "vision": {
+                        name: {key: cam[key] for key in ("calibration", "provenance")}
+                        for name, cam in frame["vision"].items()
+                    },
+                    "tactile": {
+                        side: {
+                            finger: {key: data.get(key) for key in ("metadata", "provenance")}
+                            for finger, data in fingers.items()
+                        }
+                        for side, fingers in frame["tactile"].items()
+                    },
+                }
+                if chunk["details"] != json_value(expected_details):
+                    raise ValueError("Offline viewer metadata differs from original camera/pad calibration")
+                views = chunk.get("views", {})
+                if set(views) != set(MODES):
+                    raise ValueError("Offline viewer must retain all six declared display modes")
+                hashes = {}
+                for view_mode, uri in views.items():
+                    if not isinstance(uri, str) or not uri.startswith("data:image/png;base64,"):
+                        raise ValueError("Offline viewer has a nonlocal/invalid PNG frame")
+                    raw = base64.b64decode(uri.split(",", 1)[1], validate=True)
+                    pixels = np.asarray(Image.open(io.BytesIO(raw)).convert("RGB"))
+                    expected = np.asarray(
+                        mosaic(frame, mode=view_mode, depth_range=depth_range, delta_limit=delta_range[1])
+                    )
+                    if not np.array_equal(pixels, expected):
+                        raise ValueError("Offline viewer PNG differs from the original frame/display mapping")
+                    hashes[view_mode] = hashlib.sha256(raw).hexdigest()
+                if frame_index == index:
+                    self.selected_png_sha256 = hashes[mode]
+                score, _ = _score(frame)
+                self.best_score = max(self.best_score, score)
+                self.rows.append({"index": frame_index, "sync": frame["sync"], "png_sha256": hashes})
+
+        inventory = Inventory()
+        with paths["html"].open() as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), ""):
+                inventory.feed(block)
+        inventory.close()
+        if len(inventory.rows) != len(reader) or inventory.scripts != len(reader) + 2 or not inventory.bootstrap:
+            raise ValueError("Offline viewer HTML omits original frames/bounded chunks")
+        if (
+            f"const selectedPreviewIndex={index};" not in inventory.controller
+            or "frames[i].views[mode.value]" not in inventory.controller
+            or "slider.oninput=show" not in inventory.controller
+            or "mode.onchange=show" not in inventory.controller
+        ):
+            raise ValueError("Offline viewer controls do not select the declared original preview")
+        if selected_score + 1e-12 < inventory.best_score:
+            raise ValueError("Offline viewer must show the strongest actual committed pad score")
+        if fingerprint(paths["png"]) != inventory.selected_png_sha256:
+            raise ValueError("Offline viewer PNG is not its verified selected frame")
+    probe = json.loads(
+        subprocess.check_output(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-count_frames",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=nb_read_frames",
+                "-of",
+                "json",
+                str(paths["video"]),
+            ],
+            text=True,
+        )
+    )
+    streams = probe.get("streams", [])
+    if len(streams) != 1 or int(streams[0].get("nb_read_frames", -1)) != capture["frame_count"]:
+        raise ValueError("Offline viewer MP4 omits original frames")
+    return {
+        "status": "passed",
+        "directory": str(directory),
+        "visualization": visualization,
+        "generation_receipt": receipt,
+        "verified_files": files,
+        "frame_count": len(inventory.rows),
+        "script_blocks": inventory.scripts,
+        "max_script_bytes": inventory.max_script_bytes,
+        "frames": inventory.rows,
+        "selected_frame_verified": True,
+        "png_pixel_lineage_verified": True,
+        "role": "Offline export of original native data; no new native capture or policy evaluation",
+    }
+
+
 def metrics(data):
     """Present selected finite measurements with their original field names/units."""
     rows = []
@@ -489,6 +726,8 @@ def image(path, label, inputs):
 
 
 def media(data, label, output, copy_videos, inputs):
+    if data.get("offline_viewer"):
+        data = data["offline_viewer"]
     directory = Path(data["directory"])
     parts = []
     visualization = data.get("visualization", {})
@@ -505,6 +744,7 @@ def media(data, label, output, copy_videos, inputs):
             "multimodal.png",
             "gallery.png",
             "structured_light.png",
+            "rgb-before-after.png",
         ]
     )
     preview = next((directory / name for name in candidates if name and (directory / name).is_file()), None)
@@ -661,6 +901,11 @@ def build(args):
         "capture": bundle(args.capture_dir, "capture", inputs),
         "tactile": bundle(args.tactile_dir, "tactile", inputs),
     }
+    viewer_directory = getattr(args, "capture_viewer_dir", None)
+    if viewer_directory is not None:
+        if args.output.resolve() == viewer_directory.resolve():
+            raise ValueError("Output must not overwrite an original offline viewer directory")
+        evidence["capture"]["offline_viewer"] = capture_viewer(viewer_directory, evidence["capture"], inputs)
     if args.baseline_dir.is_dir():
         evidence["baseline"] = bundle(args.baseline_dir, "baseline", inputs)
     for index, directory in enumerate(getattr(args, "sl_dir", []) or []):
@@ -694,11 +939,14 @@ def build(args):
     panels = []
     metric_rows = []
     for name, data in evidence.items():
+        control_kind = (
+            "Frozen-state RGB" if data.get("validation", {}).get("same_physics_state") is True else "Structured-light"
+        )
         label = {
             "capture": "New multimodal capture",
             "tactile": "Continuous tactile contact",
             "baseline": "Old noncontact baseline",
-        }.get(name, f"Structured-light control · {Path(data['directory']).name}")
+        }.get(name, f"{control_kind} control · {Path(data['directory']).name}")
         reasons = " · ".join(data.get("limitations", [data.get("reason", "")]))
         panels.append(
             f'<section id="{name}"><h2>{html.escape(label)}</h2><p>Status: '
@@ -761,6 +1009,9 @@ def main(argv=None):
     for name in ("reference", "capture", "tactile"):
         parser.add_argument(f"--{name}-dir", type=Path, required=True)
     parser.add_argument("--baseline-dir", type=Path, default=DEFAULT_BASELINE)
+    parser.add_argument(
+        "--capture-viewer-dir", type=Path, help="Separate verified offline export of the original capture"
+    )
     parser.add_argument(
         "--sl-dir", type=Path, action="append", help="Optional independent SL geometric controls; repeatable"
     )
