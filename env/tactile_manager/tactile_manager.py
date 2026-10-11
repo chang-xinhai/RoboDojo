@@ -104,6 +104,8 @@ class TactileManager:
             for mesh in Usd.PrimRange(root):
                 if not mesh.IsA(UsdGeom.Mesh) or not mesh.HasAPI(UsdPhysics.CollisionAPI):
                     continue
+                if UsdPhysics.CollisionAPI(mesh).GetCollisionEnabledAttr().Get() is False:
+                    continue
                 parent = mesh
                 while parent.IsValid() and str(parent.GetPath()) != "/":
                     if parent.HasAPI(UsdPhysics.RigidBodyAPI):
