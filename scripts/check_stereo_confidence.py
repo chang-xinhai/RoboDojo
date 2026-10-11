@@ -91,11 +91,17 @@ def main():
         "reconstruction_source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
         "planes": {},
         "scene": [],
+        "failure_reasons": [],
     }
     for directory in args.plane_dir:
         original = json.loads((directory / "report.json").read_text())
         sensors = {}
-        for name, sensor in original["sensors"].items():
+        inventory = original.get("sensors")
+        if not isinstance(inventory, dict) or not inventory:
+            report["failure_reasons"].append(f"Plane control has no sensor inventory: {directory.resolve()}")
+            report["planes"][str(directory.resolve())] = sensors
+            continue
+        for name, sensor in inventory.items():
             data = np.load(directory / f"{name}.npz")
             c = sensor["calibration"]
             depth = sl.reconstruct_stereo(
@@ -144,15 +150,30 @@ def main():
                             "confidence": registered_scene_error(depth, data["depth_gt"], c),
                         }
                     )
+        if not report["scene"]:
+            report["failure_reasons"].append("HDF5 input contains no camera observations")
     report["plane_acceptance"] = {"p95_relative_error": 0.05, "minimum_valid_fraction": 0.25}
-    report["passed"] = all(
-        s["confidence"].get("p95_relative_error", 1) <= 0.05 and s["confidence"]["valid_fraction"] >= 0.25
-        for sensors in report["planes"].values()
-        for s in sensors.values()
-    )
+    if report["failure_reasons"]:
+        report["passed"] = False
+        report["status"] = "failed"
+        report["plane_acceptance"]["status"] = "failed" if args.plane_dir else "not_evaluated"
+    elif not args.plane_dir:
+        # Native scene GT is a diagnostic reference, not an analytic plane
+        # control. A metrics-only replay never certifies depth acceptance.
+        report["passed"] = None
+        report["status"] = "metrics_only"
+        report["plane_acceptance"]["status"] = "not_evaluated"
+    else:
+        report["passed"] = all(
+            s["confidence"].get("p95_relative_error", 1) <= 0.05 and s["confidence"]["valid_fraction"] >= 0.25
+            for sensors in report["planes"].values()
+            for s in sensors.values()
+        )
+        report["status"] = "passed" if report["passed"] else "failed"
+        report["plane_acceptance"]["status"] = report["status"]
     (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
-    return 0 if report["passed"] else 1
+    return 1 if report["status"] == "failed" else 0
 
 
 if __name__ == "__main__":
