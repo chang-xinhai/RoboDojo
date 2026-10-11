@@ -41,14 +41,29 @@ bash reproduction/isaac61/run.sh collect --task stack_bowls --motion-demo --fram
 
 The default output is `reproduction/isaac61/outputs/multimodal-capture`. Choose
 a new `--output` directory for each recording; existing frames are never
-overwritten. `multimodal.html` provides a local frame slider; `multimodal.png`
-and `multimodal.mp4` are generated from the saved, lossless `frame_*.npz` files.
+overwritten. The canonical lossless recording is `episode.hdf5`, written one
+committed frame at a time. `multimodal.html`, `multimodal.png` and `multimodal.mp4`
+read HDF5 directly; no NPZ export is required. The HTML provides a frame slider
+and RGB/optical-depth/official-taxel-force/pad-force modes. The PNG and initial
+HTML frame select the strongest recorded pad-normal estimate; display preserves
+image aspect and original IR exposure, with fixed metric heatmap scales.
 `manifest.json` describes the recording and `validation.json` confirms the
-completed runtime checks. Rebuild the previews with:
+completed runtime checks. Failed runs retain `episode.hdf5.partial` with an
+explicit failure status. `--also-npz` optionally exports legacy frame files.
+Rebuild the previews with:
 
 ```bash
-bash reproduction/isaac61/run.sh visualize reproduction/isaac61/outputs/multimodal-capture
+bash reproduction/isaac61/run.sh visualize reproduction/isaac61/outputs/multimodal-capture/episode.hdf5
 ```
+
+Final complete contact recordings and their report are under
+`reproduction/isaac61/outputs/quality-iteration/fullmodal-contact-final`,
+`tactile-contact-final` and `final-quality-report`. The first is the complete
+three-camera/four-pad HDF5 episode; the second is a separately labelled tactile
+component episode. See the Chinese guides for [HDF5 capture and viewing](../../docs/record/hdf5-visualization.md)
+and [sensor-quality report rebuilding and interpretation](../../docs/quality.md).
+The report preserves each run's own source/audit identity; a component episode
+is not accepted as a three-camera capture.
 
 Capture and task smoke entrypoints apply the same task configuration as the
 production evaluator, including the conveyor and the extra Franka support arm
@@ -61,16 +76,18 @@ planners in a capture; sensor collection itself does not require them.
 
 | Location | Recorded fields |
 | --- | --- |
-| `head`, `left_wrist`, `right_wrist` | `rgb`, `depth_gt`, `depth_sl`, `ir_left`, `ir_right`, intrinsics and world camera poses |
-| `left` and `right`, fingers `0` and `1` | official TacSL `rgb`, absolute camera `depth`, `penetration_depth`, normal and shear forces, taxel world positions, units and provenance |
+| `head`, `left_wrist`, `right_wrist` | `rgb`, `depth_gt`, `depth_sl`, `ir_left`, `ir_right`, projector-only active IR and raw HDR radiance, intrinsics and world camera poses |
+| `left` and `right`, fingers `0` and `1` | official TacSL `rgb`, absolute optical `depth`, signed `optical_depth_delta`, `penetration_depth`, raw taxel forces and pose-derived pad forces, native poses, units and provenance |
 
 `depth_gt` is renderer ground-truth optical-axis depth in the RGB camera frame;
 `depth_sl` is independently reconstructed from projected-pattern stereo matching
 in the left IR optical frame. Both are float32 metres; compare them only after
 transforming between their calibrated frames.
-Invalid stereo depth is NaN. IR is an active projected-light simulation obtained
-from linear HDR projector-on/off subtraction; it does not model the complete
-spectral response of a physical near-infrared sensor. RGB is rendered with
+Invalid stereo depth remains NaN and is never filled with GT depth. IR combines
+independent eye background and active projector response through the declared
+sensor model; projector-only linear HDR subtraction is also saved separately.
+It does not model the complete spectral response of a physical near-infrared
+sensor. RGB is rendered with
 projectors off. Each capture keeps physics frozen through all render phases,
 then verifies the same physics frame/timestamp across all modalities. Wall
 acquisition times are separate metadata.
@@ -79,6 +96,15 @@ acquisition times are separate metadata.
 motion, bounded by its soft joint limits. Saved frames include actuator targets
 and independently measured joint positions; the run fails if either wrist does
 not measurably move. The default amplitude is 0.03 radians at 0.5 Hz.
+
+`--contact-demo --frames 100 --contact-phase-duration 0.4` records actual
+kinematic nut loading, sliding, twisting and release. It uses calibration
+compliance stiffness 100, preserving ordinary-task defaults, and is mutually
+exclusive with `--motion-demo`. It is a calibration fixture sequence rather than
+proof of policy grasping. Raw `normal_force` is official taxel-local Z;
+`pad_normal_force` is derived from actual recorded orientations along outward
+body -Y, with compression negative. Optical depth change is a geometry proxy,
+not FEM elastomer deformation; see the HDF5 guide for force axes and units.
 
 TacSL uses NVIDIA's original GelSight R1.5 geometry, calibration, penalty force
 model and Taxim rendering. Contact queries use native PhysX SDF on DirectGPU

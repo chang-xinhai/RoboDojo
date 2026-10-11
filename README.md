@@ -14,7 +14,7 @@ https://private-user-images.githubusercontent.com/88101805/619409345-cc074c5d-45
 
 This branch pins Isaac Sim **6.1.0.0** and the official Isaac Lab **v3.0.0-EA** source. The default installer and evaluation entry use the isolated `.venv-isaac61` environment. See [setup, multimodal capture and acceptance tests](reproduction/isaac61/README.md).
 
-The `arx_x5_multimodal` configuration captures RGB, renderer depth, projected stereo IR and reconstructed structured-light depth at the head and both wrists, plus official TacSL images and contact fields on both fingers of each gripper. Records include calibration, sensor provenance and one shared physics timestamp.
+The `arx_x5_multimodal` configuration captures RGB, renderer depth, projected stereo IR and reconstructed structured-light depth at the head and both wrists, plus official TacSL images and contact fields on both fingers of each gripper. Records include calibration, sensor provenance and one shared physics timestamp. The canonical streaming record is `episode.hdf5`; see [HDF5 capture and visualization](docs/record/hdf5-visualization.md) and [sensor quality reports](docs/quality.md).
 
 ## News
 
