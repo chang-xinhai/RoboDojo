@@ -38,7 +38,10 @@ class VideoStreamWriter:
         channels: int,
         fps: float = 30.0,
         is_rgb: bool = True,
+        crf: int = 23,
     ) -> None:
+        if isinstance(crf, bool) or not isinstance(crf, int) or not 0 <= crf <= 51:
+            raise ValueError("H.264 CRF must be an integer from 0 to 51")
         if channels == 3:
             pixel_format = "rgb24" if is_rgb else "bgr24"
         elif channels == 4:
@@ -73,7 +76,7 @@ class VideoStreamWriter:
                 "-vcodec",
                 "libx264",
                 "-crf",
-                "23",
+                str(crf),
                 out_path,
             ],
             stdin=subprocess.PIPE,

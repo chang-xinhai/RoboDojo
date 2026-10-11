@@ -59,6 +59,7 @@ class EpisodeVideoTests(unittest.TestCase):
             self.assertEqual(report["decoded_frames"], 3)
             self.assertEqual(report["video_fps"], 25)
             self.assertEqual(len(report["views"]), 19)
+            self.assertEqual(report["video_encoder"]["crf"], 18)
             self.assertEqual(report["tactile_rgb_field"], "raw_optical_rgb")
             self.assertEqual(report["depth_display_range_m"], [0.03, 3.0])
             self.assertTrue(report["nslv2_required_and_verified_every_frame"])
@@ -191,6 +192,7 @@ class EpisodeVideoTests(unittest.TestCase):
             video = directory / "preview.mp4"
             report = export_episode_video(writer.path, video, width=600)
             self.assertEqual(report["committed_frames"], 5)
+            self.assertEqual(report["video_encoder"]["crf"], 23)
             self.assertEqual(report["encoded_frames"], 5)
             self.assertEqual(report["video_fps"], 25)
             self.assertAlmostEqual(report["timestamp_span_s"], 0.16)

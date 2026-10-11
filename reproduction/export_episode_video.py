@@ -303,7 +303,16 @@ def export_episode_video(
                     )
                 )
                 if writer is None:
-                    writer = VideoStreamWriter(str(temporary), image.height, image.width, 3, fps=fps)
+                    # Dense IR dots need more quality during camera motion than
+                    # the existing RGB-only preview's CRF 23 setting.
+                    writer = VideoStreamWriter(
+                        str(temporary),
+                        image.height,
+                        image.width,
+                        3,
+                        fps=fps,
+                        crf=18 if layout == "unified" else 23,
+                    )
                 writer.append(np.asarray(image))
                 for side, finger in PADS:
                     data = frame["tactile"][side][finger]
@@ -370,6 +379,11 @@ def export_episode_video(
                     else ["head.rgb", "left_wrist.rgb", "right_wrist.rgb", *contact_counts]
                 ),
                 "layout": layout,
+                "video_encoder": {
+                    "codec": "libx264",
+                    "pixel_format": "yuv420p",
+                    "crf": 18 if layout == "unified" else 23,
+                },
                 "depth_display_range_m": list(depth_range) if layout == "unified" else None,
                 "invalid_depth_display_rgb": [130, 0, 130] if layout == "unified" else None,
                 "structured_light_source": reader.metadata["run"].get("nslv2", "recorded depth_sl"),
