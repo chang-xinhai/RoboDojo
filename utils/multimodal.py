@@ -36,17 +36,31 @@ def json_value(value):
     return value
 
 
-def validate_multimodal(observation):
+def validate_multimodal(observation, *, tactile_component=False):
     """Reject missing sensors, stale clocks and ambiguous depth before writing."""
     sync = observation.get("sync", {})
-    if sync.get("schema") != SCHEMA_VERSION:
-        raise ValueError(f"Expected schema {SCHEMA_VERSION}")
+    expected_schema = "robodojo.tactile_component.v1" if tactile_component else SCHEMA_VERSION
+    if sync.get("schema") != expected_schema:
+        raise ValueError(f"Expected schema {expected_schema}")
     frame = sync.get("physics_frame")
     stamp = sync.get("timestamp_ns")
-    if not isinstance(frame, int) or frame < 0 or not isinstance(stamp, int) or stamp < 0:
+    if (
+        isinstance(frame, bool)
+        or not isinstance(frame, int)
+        or frame < 0
+        or isinstance(stamp, bool)
+        or not isinstance(stamp, int)
+        or stamp < 0
+    ):
         raise ValueError("A nonnegative physics_frame and simulation timestamp_ns are required")
+    if sync.get("physics_held_fixed") is False:
+        raise ValueError("Capture did not hold physics fixed")
+    if "simulation_time_s" in sync and (
+        not np.isfinite(sync["simulation_time_s"]) or abs(sync["simulation_time_s"] * 1e9 - stamp) > 1.0
+    ):
+        raise ValueError("Simulation time does not match timestamp")
     vision = observation.get("vision", {})
-    for name in CAMERAS:
+    for name in () if tactile_component else CAMERAS:
         if name not in vision:
             raise ValueError(f"Missing required camera: {name}")
         camera = vision[name]
@@ -74,6 +88,8 @@ def validate_multimodal(observation):
             raise ValueError(f"{name}: camera timestamp does not match frozen physics time")
         if not camera["calibration"] or not camera["provenance"]:
             raise ValueError(f"{name}: calibration and provenance must be present")
+        if camera["calibration"].get("depth_unit", "m") != "m":
+            raise ValueError(f"{name}: camera depth calibration must declare metres")
     tactile = observation.get("tactile", {})
     for side in SIDES:
         if side not in tactile or not tactile[side]:
@@ -90,8 +106,25 @@ def validate_multimodal(observation):
             tactile_depth = np.asarray(data["depth"])
             if tactile_rgb.ndim != 3 or tactile_rgb.shape[-1] not in (3, 4) or tactile_rgb.dtype != np.uint8:
                 raise ValueError(f"{side}.{finger}: TacSL RGB must be uint8 HWC")
-            if tactile_depth.shape[:2] != tactile_rgb.shape[:2] or tactile_depth.dtype != np.float32:
+            if (
+                tactile_depth.shape not in (tactile_rgb.shape[:2], (*tactile_rgb.shape[:2], 1))
+                or tactile_depth.dtype != np.float32
+            ):
                 raise ValueError(f"{side}.{finger}: TacSL depth must match image dimensions in float32 metres")
+            if not np.all(np.isfinite(tactile_depth)) or np.any(tactile_depth < 0) or not np.any(tactile_depth > 0):
+                raise ValueError(f"{side}.{finger}: invalid TacSL optical depth")
+            if "optical_depth_delta" in data:
+                delta = np.asarray(data["optical_depth_delta"])
+                if delta.shape != tactile_depth.shape or delta.dtype != np.float32 or not np.all(np.isfinite(delta)):
+                    raise ValueError(f"{side}.{finger}: invalid signed optical depth delta")
+            for key, units in (
+                ("depth_units", "m"),
+                ("penetration_units", "m"),
+                ("force_units", "N"),
+                ("optical_depth_delta_units", "m"),
+            ):
+                if data.get("metadata", {}).get(key, units) != units:
+                    raise ValueError(f"{side}.{finger}: inconsistent metric units for {key}")
             force_fields = ("normal_force", "shear_force", "penetration_depth", "points_pos_w")
             image_only = data.get("provenance", {}).get("force_field_available") is False
             if image_only:
@@ -108,13 +141,22 @@ def validate_multimodal(observation):
                     raise ValueError(f"{side}.{finger}: invalid TacSL force or penetration")
                 points = np.asarray(data["points_pos_w"])
                 shear = np.asarray(data["shear_force"])
+                if not np.all(np.isfinite(points)) or not np.all(np.isfinite(shear)) or np.any(penetration < 0):
+                    raise ValueError(f"{side}.{finger}: invalid TacSL shear, world points or penetration")
                 if (
-                    points.shape[-1] != 3
+                    points.ndim != 2
+                    or force.ndim != 1
+                    or penetration.ndim != 1
+                    or shear.ndim != 2
+                    or points.shape[-1] != 3
+                    or shear.shape[-1] not in (2, 3)
                     or points.shape[0] != force.shape[0]
                     or shear.shape[0] != force.shape[0]
                     or penetration.shape[0] != force.shape[0]
                 ):
                     raise ValueError(f"{side}.{finger}: tactile force samples do not match taxel positions")
+            if "physics_frame" in data and (isinstance(data["physics_frame"], bool) or data["physics_frame"] != frame):
+                raise ValueError(f"{side}.{finger}: tactile physics frame mismatch")
             if data.get("timestamp_ns") != stamp:
                 raise ValueError(f"{side}.{finger}: tactile timestamp mismatch")
             if data.get("provenance", {}).get("backend") != "isaaclab_tacsl":
