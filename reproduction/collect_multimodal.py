@@ -188,7 +188,6 @@ try:
     if args.expert_controller:
         module_name, factory_name = args.expert_controller.rsplit(":", 1)
         factory = getattr(importlib.import_module(module_name), factory_name)
-        env.reward_manager.init_state()
         expert = factory(env, args)
         expert_start_time, _ = simulation_snapshot(env.sim.sim)
         from utils.native_contact_trace import NativeContactTrace

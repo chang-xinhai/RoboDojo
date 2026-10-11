@@ -76,8 +76,10 @@ class Env:
         if mode.startswith("expert_"):
             assert cfg.tactile.contact_conditioned_observations is True
             assert list(cfg.tactile.contact_object_labels) == ["tube0", "tube1", "tube2"]
+            task_env = self
             class Rewards:
-                def init_state(self): pass
+                def init_state(self):
+                    assert task_env.success == [True], "expert must establish episode validity before reward initialization"
                 def call_func_parser(self, check, env_idx):
                     return not (mode == "expert_official_failure" and check[0] == "axis_up")
                 def is_A_depth_in_B(self, **kwargs): return ("depth", kwargs)
@@ -208,6 +210,8 @@ if mode.startswith("expert_"):
     class ExpertController:
         def __init__(self, env, args):
             self.env = env
+            env.success = [True]
+            env.reward_manager.init_state()
             assert args.expert_trajectory.name == "official-commands.npz"
             self.command = None
         @property
