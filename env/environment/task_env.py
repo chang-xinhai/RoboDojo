@@ -113,6 +113,7 @@ class TaskEnv(BaseEnv):
 
     def update_seed(self, seed: Any | None = None):
         super().update_seed(seed)
+        self.env_seed_list = self.env_seeds
         if hasattr(self, "scene_manager") and self.scene_manager is not None:
             self.scene_manager.update_env_seeds(self.env_seeds)
         if hasattr(self, "robot_manager") and self.robot_manager is not None:

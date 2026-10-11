@@ -75,6 +75,8 @@ class ObsManager:
                 raise RuntimeError("Multimodal capture requires enabled structured-light cameras")
             if self.tactile_manager is None or not getattr(self.tactile_manager, "enabled", False):
                 raise RuntimeError("Multimodal capture requires the actual Isaac Lab TacSL tactile manager")
+        if hasattr(env, "env_seed_list"):
+            self.desc_manager.update_env_seeds(env.env_seed_list)
         self.initialize_instruction()
 
     def initialize_instruction(self):

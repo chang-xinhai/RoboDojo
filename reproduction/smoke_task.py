@@ -185,6 +185,8 @@ try:
         env.scene_manager.layout_manager.set_saved_layout(0, replay_layout)
         replay_profile = episode_profile(runtime_profile, replay_provenance)
         reset_task_episode(env, replay_profile)
+        obs.initialize(env)
+        obs.reset()
         for _ in range(10):
             env.sim_step(render=False)
         replay_runtime = validate_task_runtime(env)
