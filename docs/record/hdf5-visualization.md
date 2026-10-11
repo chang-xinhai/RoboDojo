@@ -10,6 +10,8 @@ reproduction/isaac61/outputs/quality-iteration/fullmodal-contact-final/episode.h
 
 ## 直接查看现有 HDF5
 
+已验证的完整 100 帧逐帧入口为 `reproduction/isaac61/outputs/quality-iteration/chunked-hdf5-viewer-final/multimodal.html`。该离线导出来自上面的原始 HDF5，按帧使用独立脚本，避免长录像超过 V8 单字符串上限。原始采集及旧预览保留；总览入口为 `reproduction/isaac61/outputs/quality-iteration/final-quality-report-v2/index.html`。
+
 ```bash
 bash reproduction/isaac61/run.sh visualize \
   reproduction/isaac61/outputs/quality-iteration/fullmodal-contact-final/episode.hdf5

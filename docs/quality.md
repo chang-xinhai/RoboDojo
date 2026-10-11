@@ -3,7 +3,7 @@
 最终可视化入口：
 
 ```text
-reproduction/isaac61/outputs/quality-iteration/final-quality-report/index.html
+reproduction/isaac61/outputs/quality-iteration/final-quality-report-v2/index.html
 ```
 
 页面展示原始参考图像、真实完整 HDF5 采集、四指接触标定，以及独立结构光几何控制。PNG 嵌入页面，MP4 和原始 HTML 查看器可以直接打开；状态、源文件 SHA256、源码与配置版本、实际后端和显示量程保留在报告中。各项测试结果与指标以 `report.json` 和输入的原始审计为准。
@@ -16,11 +16,12 @@ reproduction/isaac61/outputs/quality-iteration/final-quality-report/index.html
 .venv-isaac61/bin/python scripts/build_sensor_quality_report.py \
   --reference-dir reproduction/isaac61/outputs/quality-iteration/review-reference \
   --capture-dir reproduction/isaac61/outputs/quality-iteration/fullmodal-contact-final \
+  --capture-viewer-dir reproduction/isaac61/outputs/quality-iteration/chunked-hdf5-viewer-final \
   --tactile-dir reproduction/isaac61/outputs/quality-iteration/tactile-contact-final \
   --sl-dir reproduction/isaac61/outputs/quality-iteration/sl-confidence-plane-final \
   --sl-dir reproduction/isaac61/outputs/quality-iteration/sl-confidence-tilted-final \
   --sl-dir reproduction/isaac61/outputs/quality-iteration/frozen-rgb-v2 \
-  --output reproduction/isaac61/outputs/quality-iteration/final-quality-report \
+  --output reproduction/isaac61/outputs/quality-iteration/final-quality-report-v2 \
   --copy-videos --require-passed
 ```
 
@@ -49,3 +50,5 @@ PNG 与 HTML 起始帧选择实际记录中最强的胶面法向力帧，旧格�
 IR 使用原始 uint8 灰度与实际曝光，是 RTX 可见辐亮度和传感器响应代理，未模拟完整 NIR 材质光谱。GT 深度属于 RGB 光学坐标系；SL 深度属于左 IR 光学坐标系，来自双目匹配。SL 稀疏或无效像素保留 NaN，没有 GT 填充。深度、触觉热图使用固定跨帧物理量色标，颜色只影响显示，HDF5 原 dtype、NaN 和力符号保持不变。
 
 不同参考场景、光照和接触模型的视觉差异不构成量化改进百分比。报告保留各原始结果及其限制，而不从外观推断未测量的精度或策略成功率。
+
+新查看器按帧输出独立脚本，避免长录像超过 V8 单字符串上限。`--capture-viewer-dir` 验证单独的离线导出与原始 HDF5 路径、SHA256、全部帧和显示内容一致，再使用其图片、视频及 HTML 入口。原始采集、旧预览及审计不会被覆盖；报告分别保存原采集与离线查看器的来源。

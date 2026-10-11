@@ -58,7 +58,7 @@ bash reproduction/isaac61/run.sh visualize reproduction/isaac61/outputs/multimod
 
 Final complete contact recordings and their report are under
 `reproduction/isaac61/outputs/quality-iteration/fullmodal-contact-final`,
-`tactile-contact-final` and `final-quality-report`. The first is the complete
+`tactile-contact-final` and `final-quality-report-v2`. The first is the complete
 three-camera/four-pad HDF5 episode; the second is a separately labelled tactile
 component episode. See the Chinese guides for [HDF5 capture and viewing](../../docs/record/hdf5-visualization.md)
 and [sensor-quality report rebuilding and interpretation](../../docs/quality.md).
