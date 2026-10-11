@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import sys
 
 LIMITATIONS = [
     "IR uses RTX projected visible radiance as a proxy, without physical NIR material response.",
@@ -99,11 +100,44 @@ def recording(directory, inputs):
         raise ValueError(f"Missing recording frame inventory: {directory}")
     if len(manifest["frames"]) != len(validation["frames"]):
         raise ValueError(f"Recording manifest/validation frame count differs: {directory}")
+    hdf5 = None
+    if manifest.get("storage") == "hdf5":
+        project_root = str(Path(__file__).resolve().parents[1])
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        from utils.multimodal import SCHEMA_VERSION
+        from utils.multimodal_hdf5 import HDF5Reader, validate_hdf5
+
+        filename = manifest.get("file", "episode.hdf5")
+        hdf5_path = (directory / filename).resolve(strict=True)
+        if not hdf5_path.is_relative_to(directory.resolve()):
+            raise ValueError(f"HDF5 path escapes recording directory: {hdf5_path}")
+        hdf5 = validate_hdf5(hdf5_path, require_complete=status(validation) == "passed")
+        if hdf5["validated_frames"] != len(manifest["frames"]):
+            raise ValueError(f"HDF5/manifest frame count differs: {directory}")
+        with HDF5Reader(hdf5_path) as reader:
+            if reader.metadata["observation_schema"] != SCHEMA_VERSION:
+                raise ValueError("A tactile-only component cannot establish a full multimodal recording")
+            for index, (frame, checked) in enumerate(zip(manifest["frames"], validation["frames"], strict=True)):
+                actual = reader.sync(index)
+                if frame.get("hdf5_frame", frame.get("index")) != index or checked.get("index") != index:
+                    raise ValueError(f"HDF5 frame indices differ at {index}: {directory}")
+                if any(frame.get(key) != actual[key] or checked.get(key) != actual[key] for key in actual):
+                    raise ValueError(f"HDF5/manifest/validation clocks differ at {index}: {directory}")
+        digest = hashlib.sha256()
+        with hdf5_path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        hdf5.update(source_hdf5=str(hdf5_path), source_hdf5_sha256=digest.hexdigest())
+        inputs.append({"file": str(hdf5_path), "sha256": digest.hexdigest()})
+    elif manifest.get("storage") not in (None, "npz"):
+        raise ValueError(f"Unsupported recording storage: {manifest['storage']}")
     previous = -1
     for frame in manifest["frames"]:
-        frame_path = (directory / frame["file"]).resolve(strict=True)
-        if not frame_path.is_relative_to(directory.resolve()):
-            raise ValueError(f"Frame path escapes recording directory: {frame_path}")
+        if hdf5 is None:
+            frame_path = (directory / frame["file"]).resolve(strict=True)
+            if not frame_path.is_relative_to(directory.resolve()):
+                raise ValueError(f"Frame path escapes recording directory: {frame_path}")
         if frame["timestamp_ns"] <= previous:
             raise ValueError(f"Non-increasing recorded timestamps: {directory}")
         previous = frame["timestamp_ns"]
@@ -117,6 +151,8 @@ def recording(directory, inputs):
         "frame_count": count,
         "measured_sampling_hz": (count - 1) / duration if duration > 0 else None,
     }
+    if hdf5 is not None:
+        result["hdf5_validation"] = hdf5
     audit = directory / "independent-frame-audit.json"
     if audit.exists():
         result["independent_audit"] = load_json(audit, inputs)
