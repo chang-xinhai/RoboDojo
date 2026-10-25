@@ -756,10 +756,6 @@ class CuroboPlanner:
         n_active = len(self.active_joints_name)
         n_cspace = len(self.cspace_joint_names)
 
-        if dof == n_cspace:
-            return arr[..., self._active_to_cspace_idx]
-        if dof == n_active:
-            return arr
         if traj_joint_names is not None and len(traj_joint_names) == dof:
             traj_names = list(traj_joint_names)
             try:
@@ -769,3 +765,8 @@ class CuroboPlanner:
                 raise ValueError(
                     f"Trajectory joint_names {traj_names} do not contain all active joints {self.active_joints_name}"
                 ) from None
+        if dof == n_cspace:
+            return arr[..., self._active_to_cspace_idx]
+        if dof == n_active:
+            return arr
+        raise ValueError(f"Unexpected trajectory dimension {dof} without usable joint_names")
