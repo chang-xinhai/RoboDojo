@@ -10,6 +10,8 @@ from env.tactile_manager import TactileManager
 
 class TaskEnv(BaseEnv):
     def __init__(self, config, app, **kwargs):
+        self.no_render = bool(config.get("no_render", False))
+        self.contact_reports = bool(config.get("contact_reports", False))
         self.sim_config = config.sim
         self.scene_config = config.scene
         self.num_envs = self.sim_config.scene.num_envs
@@ -95,10 +97,16 @@ class TaskEnv(BaseEnv):
         # TacSL mounts and SDF schemas must exist before Isaac Lab activates
         # the PhysX articulation and contact views during its first reset.
         self.tactile_manager.initialize(sim, self.scene_manager)
+        if self.contact_reports:
+            from utils.replay_trace import enable_contact_reports
+
+            enable_contact_reports(self.scene_manager)
         super()._post_setup_scene(sim)
         self.camera_manager.initialize(sim)
         self.capture_manager.initialize(sim)
         self.camera_manager.post_init()
+        if self.no_render:
+            return
         # These legacy Replicator cameras are owned outside InteractiveScene,
         # so publish their rendering requirement to Isaac Lab explicitly.
         sim.sim.set_setting("/isaaclab/render/rtx_sensors", True)
@@ -137,8 +145,9 @@ class TaskEnv(BaseEnv):
         self.tactile_manager.reset()
         for _ in range(300):
             self.sim_step(render=False)
-        self.camera_manager.reset()
-        self.capture_manager.reset()
+        self.camera_manager.reset(render=not self.no_render)
+        if not self.no_render:
+            self.capture_manager.reset()
         self.tactile_manager.calibrate()
 
     def step(self, meta_control_list: List[ControlSeq]):

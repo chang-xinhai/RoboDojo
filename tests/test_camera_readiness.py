@@ -2,6 +2,7 @@
 
 import importlib.util
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -15,6 +16,39 @@ spec.loader.exec_module(readiness)
 
 
 class CameraReadinessTests(unittest.TestCase):
+    def test_busy_global_streamer_cannot_block_ready_products_or_hide_missing_files(self):
+        for files_pending, stalled in ((False, False), (True, False), (False, True)):
+            with self.subTest(files_pending=files_pending, stalled=stalled):
+                completed = [0, 0]
+                updates = []
+                def pump():
+                    updates.append(1)
+                    completed[0] += 1
+                    completed[1] += int(not stalled)
+                def forbidden_global_wait():
+                    self.fail("Unbounded global streaming wait was called")
+                native = SimpleNamespace(_wait_for_streaming_complete=forbidden_global_wait)
+                modules = {
+                    "isaaclab_physx.renderers.isaac_rtx_renderer_utils": native,
+                    "omni.kit.app": SimpleNamespace(get_app=lambda: SimpleNamespace(update=pump)),
+                    "omni.usd": SimpleNamespace(get_context=lambda: SimpleNamespace(
+                        get_stage_loading_status=lambda: ("texture loading", 0 if files_pending else 1, 1))),
+                }
+                env = SimpleNamespace(render=lambda: native._wait_for_streaming_complete())
+                with patch.dict(sys.modules, modules), patch.object(readiness, "zero_delay_active", return_value=True):
+                    if files_pending or stalled:
+                        with self.assertRaisesRegex(readiness.CameraFrameNotReady,
+                            "USD files loading" if files_pending else "fresh frames"):
+                            readiness.wait_for_camera_data(env, self.payload, physics_state=lambda: (0.4, 100),
+                                delivery_clock=lambda: tuple(completed), max_passes=3)
+                    else:
+                        data, passes = readiness.wait_for_camera_data(env, self.payload,
+                            physics_state=lambda: (0.4, 100), delivery_clock=lambda: tuple(completed), max_passes=3)
+                        self.assertEqual(passes, 1)
+                        self.assertEqual(readiness.pending_camera_payloads(data), [])
+                    self.assertIs(native._wait_for_streaming_complete, forbidden_global_wait)
+                self.assertLessEqual(len(updates), 3)
+
     def setUp(self):
         self.original_color_guard = readiness.ensure_camera_color_render_enabled
         patcher = patch.object(readiness, "ensure_camera_color_render_enabled")

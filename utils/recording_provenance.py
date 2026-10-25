@@ -28,26 +28,35 @@ def capture_provenance(root):
     root = Path(root)
     result = {"packages": {}}
     try:
-        result["source_commit"] = subprocess.check_output(
-            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
-        ).strip()
-        listed = (
-            subprocess.check_output(
-                ["git", "-C", str(root), "ls-files", "--cached", "--others", "--exclude-standard", "-z"]
+        from utils.runtime_snapshot import load_runtime_snapshot
+        snapshot = load_runtime_snapshot(root)
+        if snapshot is not None:
+            result.update(source_commit=snapshot["original_head"], source_dirty=snapshot["original_dirty"],
+                          source_file_sha256=snapshot["files"], source_snapshot=str(root.resolve()),
+                          source_snapshot_manifest_sha256=hashlib.sha256((root/".robodojo-runtime-snapshot.json").read_bytes()).hexdigest())
+            tree = "\n".join(f"{name}:{digest}" for name, digest in sorted(snapshot["files"].items()))
+            result["source_tree_sha256"] = hashlib.sha256(tree.encode()).hexdigest()
+        else:
+            result["source_commit"] = subprocess.check_output(
+                ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+            ).strip()
+            listed = (
+                subprocess.check_output(
+                    ["git", "-C", str(root), "ls-files", "--cached", "--others", "--exclude-standard", "-z"]
+                )
+                .decode()
+                .split("\0")
             )
-            .decode()
-            .split("\0")
-        )
-        result["source_file_sha256"] = {}
-        for name in sorted(set(listed)):
-            path = root / name
-            if path.suffix in (".py", ".yml", ".yaml", ".toml") and path.is_file():
-                result["source_file_sha256"][name] = hashlib.sha256(path.read_bytes()).hexdigest()
-        tree = "\n".join(f"{name}:{digest}" for name, digest in result["source_file_sha256"].items())
-        result["source_tree_sha256"] = hashlib.sha256(tree.encode()).hexdigest()
-        result["source_dirty"] = bool(
-            subprocess.check_output(["git", "-C", str(root), "status", "--porcelain"], text=True).strip()
-        )
+            result["source_file_sha256"] = {}
+            for name in sorted(set(listed)):
+                path = root / name
+                if path.suffix in (".py", ".yml", ".yaml", ".toml") and path.is_file():
+                    result["source_file_sha256"][name] = hashlib.sha256(path.read_bytes()).hexdigest()
+            tree = "\n".join(f"{name}:{digest}" for name, digest in result["source_file_sha256"].items())
+            result["source_tree_sha256"] = hashlib.sha256(tree.encode()).hexdigest()
+            result["source_dirty"] = bool(
+                subprocess.check_output(["git", "-C", str(root), "status", "--porcelain"], text=True).strip()
+            )
     except (OSError, subprocess.CalledProcessError) as error:
         result["source_unavailable_reason"] = str(error)
     for package in ("isaacsim", "isaaclab", "h5py", "numpy"):

@@ -7,6 +7,37 @@ gradients and returns distances in metres, leaving force equations intact.
 
 import torch
 import warp as wp
+import numpy as np
+
+
+def shape_affine_in_body(mesh, body):
+    """Return row-vector mesh-to-rigid-body-metre affine without authoring USD.
+
+    Positive orthogonal axis scales are supported. Reflections, shear and
+    degenerate frames are rejected rather than approximated by one scale.
+    A scaled body is allowed only when its own scale is uniform, as before.
+    """
+    from pxr import Gf, UsdGeom
+
+    cache = UsdGeom.XformCache()
+    matrices = [cache.GetLocalToWorldTransform(p) for p in (mesh, body)]
+    for index, matrix in enumerate(matrices):
+        a = np.asarray(matrix, dtype=np.float64)
+        if not np.isfinite(a).all() or not np.allclose(a[:3, 3], 0, atol=1e-12) or abs(a[3, 3]-1) > 1e-12:
+            raise ValueError("TacSL requires finite affine shape/body transforms")
+        axes = a[:3, :3]
+        lengths = np.linalg.norm(axes, axis=1)
+        if min(lengths) <= 1e-12 or np.linalg.det(axes) <= 0:
+            raise ValueError("TacSL rejects reflected or degenerate shape/body transforms")
+        normalized = axes / lengths[:, None]
+        if not np.allclose(normalized @ normalized.T, np.eye(3), atol=1e-6, rtol=0):
+            raise ValueError("TacSL rejects sheared shape/body transforms")
+        if index == 1 and np.ptp(lengths) > 1e-5 * max(lengths):
+            raise ValueError("TacSL requires positive uniform scale on the rigid body")
+    transform = Gf.Transform(matrices[1])
+    rigid = Gf.Matrix4d(1).SetRotate(transform.GetRotation())
+    rigid.SetTranslateOnly(matrices[1].ExtractTranslation())
+    return np.asarray(matrices[0] * rigid.GetInverse(), dtype=np.float64)
 
 
 def shape_pose_in_body(mesh, body):

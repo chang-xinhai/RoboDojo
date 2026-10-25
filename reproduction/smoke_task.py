@@ -27,6 +27,7 @@ parser.add_argument("--repeat-envs", type=int, default=1, help="Construct and cl
 parser.add_argument("--check-reset", action="store_true", help="Probe real GPU body/joint motion and exact resets")
 parser.add_argument("--probe-mass-variant", action="store_true", help="Replay a separately pooled native mass variant")
 parser.add_argument("--enable-planner", action="store_true", help="Also initialize production planners")
+parser.add_argument("--disable-nslv2", action="store_true", help="Capture raw stereo IR without starting NSLv2 inference")
 add_app_launcher_args(parser, AppLauncher)
 args = parser.parse_args()
 if args.repeat_envs < 1:
@@ -59,6 +60,8 @@ try:
             for key in ("sim", "scene", "camera", "robot")
         }
     )
+    if args.disable_nslv2:
+        cfg.camera.structured_light.nsl_v2.enabled = False
     task_name, task_class = load_task_class(args.task)
     cfg.tactile = eval_cfg.get("tactile", {})
     cfg.task_env = load_yaml(str(ROOT / "task/RoboDojo/config" / (task_name + ".yml")))
@@ -142,12 +145,12 @@ try:
         rgb = camera.get("rgb", camera.get("color"))
         assert rgb is not None, (name, list(camera))
         assert rgb.dtype == np.uint8 and rgb.ndim == 3 and rgb.shape[-1] == 3, (name, rgb.shape, rgb.dtype)
-        assert "depth" in camera, (name, camera.keys())
-        depth = camera["depth"]
+        depth = camera.get("depth", camera.get("depth_gt"))
+        assert depth is not None, (name, camera.keys())
         assert depth.shape == rgb.shape[:2], (name, depth.shape, rgb.shape)
         assert np.any(np.isfinite(depth) & (depth > 0)), name
         shapes[name] = {key: list(value.shape) for key, value in camera.items() if hasattr(value, "shape")}
-    assert set(shapes) == {"cam_head", "cam_left_wrist", "cam_right_wrist"}, shapes
+    assert set(shapes) == {"head", "left_wrist", "right_wrist"}, shapes
     import importlib.metadata as metadata
     import subprocess
 
@@ -174,6 +177,7 @@ try:
         "camera_shapes": shapes,
         "policy_evaluation": False,
         "planner_initialized": args.enable_planner,
+        "nslv2_inference_enabled": not args.disable_nslv2,
         "layout": layout_provenance,
         "scene": scene_evidence,
         "motion_and_reset": reset_evidence,

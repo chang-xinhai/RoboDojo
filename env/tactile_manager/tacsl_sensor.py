@@ -139,7 +139,7 @@ class RoboDojoTacSLSensor(TacSLCameraBoundary, VisuoTactileSensor, SingleEnviron
         self._elastomer_com_b = wp.to_torch(self._elastomer_body_view.get_coms()).to(self._device)[..., :3]
         if self.cfg.contact_object_prim_path_expr is None:
             return
-        if self._requested_contact_query_backend == "warp_triangle_mesh":
+        if self._requested_contact_query_backend in ("auto", "warp_triangle_mesh"):
             mesh, body = find_warp_contact_components(self.stage, self.cfg.contact_object_prim_path_expr)
         else:
             mesh, body = self._find_contact_object_components()
@@ -150,6 +150,7 @@ class RoboDojoTacSLSensor(TacSLCameraBoundary, VisuoTactileSensor, SingleEnviron
                 self.cfg.tactile_array_size[0] * self.cfg.tactile_array_size[1],
                 self._device,
                 self._requested_contact_query_backend,
+                body=body,
             )
         )
         self._contact_object_body_view = self._physics_sim_view.create_rigid_body_view([str(body.GetPath())])
@@ -158,8 +159,9 @@ class RoboDojoTacSLSensor(TacSLCameraBoundary, VisuoTactileSensor, SingleEnviron
                 f"TacSL requires one initialized SDF collider/body at {mesh.GetPath()}, {body.GetPath()}; "
                 f"matched shapes={self._contact_object_sdf_view.count}, bodies={self._contact_object_body_view.count}."
             )
-        rotation, translation, scale = shape_pose_in_body(mesh, body)
-        self._contact_object_sdf_view = BodyFrameSdfView(
-            self._contact_object_sdf_view, rotation, translation, self._device, geometry_scale=scale
-        )
+        if self.contact_query_metadata.get("query_coordinate_frame") != "rigid_body_metres":
+            rotation, translation, scale = shape_pose_in_body(mesh, body)
+            self._contact_object_sdf_view = BodyFrameSdfView(
+                self._contact_object_sdf_view, rotation, translation, self._device, geometry_scale=scale
+            )
         self._contact_object_com_b = wp.to_torch(self._contact_object_body_view.get_coms()).to(self._device)[..., :3]

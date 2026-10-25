@@ -95,9 +95,9 @@ class RecordedActions:
                 initial_ee[side] = finite_array(handle[f"state/{side}_ee_poses"][0], (7,), f"{side} source initial EE")
             if len(lengths) != 1:
                 raise ValueError("Left and right source trajectories must have equal frame counts")
-        return cls(
-            path, hashlib.sha256(path.read_bytes()).hexdigest(), frequency, arm, gripper, initial_arm, initial_ee
-        )
+        with path.open("rb") as stream:
+            source_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
+        return cls(path, source_sha256, frequency, arm, gripper, initial_arm, initial_ee)
 
     @property
     def frame_count(self):

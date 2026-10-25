@@ -31,7 +31,9 @@ class TactileManager:
             raise ValueError("Use task contact_object_labels or explicit contact_object_paths, not both")
         if self.config.get("contact_conditioned_observations") and labels is None:
             raise ValueError("Contact-conditioned tactile observations require explicit native task contact labels")
-        mount = self.config.get("mount_position_link", (0.035, 0.024, -0.06776))
+        # Align active gel grid with X5 jaw contact-face bbox center: X=63.5mm,
+        # Z=-1.196808mm. Gel grid center is Z=67.76mm in its actor frame.
+        mount = self.config.get("mount_position_link", (0.063500002, 0.024, -0.068956808))
         if not isinstance(mount, Sequence) or isinstance(mount, str) or len(mount) != 3:
             raise ValueError(
                 "TacSL mount_position_link must contain [forward_x, absolute_inward_y, origin_z] in metres"
@@ -44,6 +46,7 @@ class TactileManager:
         if self.contact_query_backend not in ("auto", "physx_native_sdf", "warp_triangle_mesh"):
             raise ValueError(f"Unsupported TacSL contact_query_backend: {self.contact_query_backend!r}")
         self.enabled = bool(self.config.get("enabled", False))
+        self.enable_camera_tactile = bool(self.config.get("enable_camera_tactile", True))
         self.robot_manager = robot_manager
         self.device = str(device)
         self.sim = None
@@ -67,7 +70,8 @@ class TactileManager:
         self.scene_manager = scene_manager
         # Publish optical requirements before PhysX reset, including tasks
         # that do not configure a head/wrist camera manager.
-        sim.sim.set_setting("/isaaclab/render/rtx_sensors", True)
+        if self.enable_camera_tactile:
+            sim.sim.set_setting("/isaaclab/render/rtx_sensors", True)
         self.stage = omni.usd.get_context().get_stage()
         asset = self.asset_root / "gelsight_r15_finger" / "gelsight_r15_finger.usd"
         if not asset.exists():
@@ -185,26 +189,20 @@ class TactileManager:
                     )
 
     def _prepare_sdf(self, expression):
-        import isaaclab.sim as sim_utils
-        from pxr import PhysxSchema, Usd, UsdGeom, UsdPhysics
+        """Validate an already-authored SDF collider; never recook task physics."""
+        from pxr import Usd, UsdGeom, UsdPhysics
 
-        prims = sim_utils.find_matching_prims(expression)
-        if not prims:
-            raise ValueError(f"No TacSL contact object matches {expression}")
-        for root in prims:
-            meshes = [p for p in Usd.PrimRange(root) if p.IsA(UsdGeom.Mesh) and p.HasAPI(UsdPhysics.CollisionAPI)]
-            if not meshes:
-                raise ValueError(
-                    f"TacSL requires a mesh collider under {root.GetPath()}; primitives must be converted to meshes."
-                )
-            for mesh in meshes:
-                UsdPhysics.MeshCollisionAPI.Apply(mesh).CreateApproximationAttr("sdf")
-                sdf = PhysxSchema.PhysxSDFMeshCollisionAPI.Apply(mesh)
-                sdf.CreateSdfResolutionAttr(int(self.config.get("sdf_resolution", 128)))
+        root = self.stage.GetPrimAtPath(expression)
+        if not root.IsValid():
+            raise ValueError(f"No TacSL contact object at {expression}")
+        meshes = [p for p in Usd.PrimRange(root) if p.IsA(UsdGeom.Mesh) and p.HasAPI(UsdPhysics.CollisionAPI)]
+        if not meshes or any(UsdPhysics.MeshCollisionAPI(p).GetApproximationAttr().Get() != "sdf" for p in meshes):
+            raise ValueError("Native TacSL SDF needs authored SDF cooking; use auto to preserve other colliders")
 
     def _prepare_contact_collisions(self):
-        """Explicit triangle queries retain the task asset's original cooking."""
-        if self.contact_query_backend != "warp_triangle_mesh":
+        # Auto queries existing SDF meshes natively and other original surfaces
+        # through the triangle backend. Neither mode authors collision schemas.
+        if self.contact_query_backend == "physx_native_sdf":
             for path in self.contact_paths:
                 self._prepare_sdf(path)
 
@@ -308,13 +306,13 @@ class TactileManager:
                     update_period=0,
                     renderer_cfg=IsaacRtxRendererCfg(depth_clipping_behavior="max", enable_scene_partitioning=False),
                 )
-                if index == 0
+                if index == 0 and self.enable_camera_tactile
                 else None
             )
             cfg = VisuoTactileSensorCfg(
                 prim_path=base + f"/elastomer/sensor_{index}",
                 update_period=0,
-                enable_camera_tactile=index == 0,
+                enable_camera_tactile=index == 0 and self.enable_camera_tactile,
                 enable_force_field=path is not None,
                 camera_cfg=camera,
                 render_cfg=render_cfg,
@@ -343,13 +341,14 @@ class TactileManager:
 
     def calibrate(self):
         """Acquire the initial no-contact RTX depth with open empty jaws."""
-        if not self.enabled or self._calibrated:
+        if not self.enabled or self._calibrated or not self.enable_camera_tactile:
             return
         from isaaclab_physx.renderers.isaac_rtx_renderer_utils import ensure_isaac_rtx_render_update
         import torch
 
         from utils.isaaclab_compat import as_torch
 
+        self._wait_for_optical_products()
         for _, sensors in self._sensor_groups():
             for _attempt in range(8):
                 # A just-created RTX product can return an empty all-zero frame.
@@ -375,10 +374,40 @@ class TactileManager:
     def update(self, dt=0.0, force_recompute=True):
         if not self.enabled:
             return
+        if self.enable_camera_tactile and self._calibrated:
+            self._wait_for_optical_products()
         self.calibrate()
         for _, sensors in self._sensor_groups():
             for sensor in sensors:
                 sensor.update(dt, force_recompute=force_recompute)
+
+    def _wait_for_optical_products(self):
+        """Fence each actual gel depth product before reading or calibration."""
+        from env.camera_manager.capture.render_sync import RenderProductDeliveryFence, wait_for_camera_data
+        from utils.isaaclab_compat import simulation_snapshot
+
+        primaries = [sensors[0] for _, sensors in self._sensor_groups()]
+        if getattr(self, "_optical_delivery_fence", None) is None:
+            self._optical_delivery_fence = RenderProductDeliveryFence(
+                render_products=[sensor._camera_sensor._render_data.render_product for sensor in primaries]
+            )
+        def current_depth():
+            # get_initial_render() replaces the no-contact calibration. Read
+            # current delivered products here without recalibrating on contact.
+            samples = []
+            for sensor in primaries:
+                camera = sensor._camera_sensor
+                camera.update(dt=0.0, force_recompute=True)
+                samples.append({"distance_to_image_plane": [{"data": camera.data.output["distance_to_image_plane"]}]})
+            return samples
+
+        wait_for_camera_data(
+            self.sim.sim,
+            current_depth,
+            physics_state=lambda: simulation_snapshot(self.sim.sim),
+            max_passes=32,
+            delivery_clock=self._optical_delivery_fence.snapshot,
+        )
 
     def get_observations(self):
         """Collect each actual environment independently and stack image batches."""
@@ -452,6 +481,11 @@ class TactileManager:
                             "gel_pose_w_xyzw": gel_pose,
                             "provenance": {
                                 "backend": "isaaclab_tacsl",
+                                "optical_freshness": "native render-product completion fence; frozen physics",
+                                "native_render_product_completions": dict(zip(
+                                    self._optical_delivery_fence.paths,
+                                    self._optical_delivery_fence.snapshot(), strict=True
+                                )) if self.enable_camera_tactile else None,
                                 "model": "official_TacSL_penalty_and_Taxim",
                                 "sensor": "GelSight_R1.5",
                                 "contact_query_backend": sensors[0].contact_query_backend if available else None,

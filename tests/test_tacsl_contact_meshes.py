@@ -210,7 +210,7 @@ def test_actual_collector_omegaconf_native_label_list_is_accepted():
     assert list(manager.config.contact_object_labels) == ["tube0", "tube1", "tube2"]
 
 
-def test_task_mount_repositions_real_pad_in_the_original_grasp_plane_and_preserves_legacy_default():
+def test_mechanical_default_and_explicit_task_mount_keep_native_jaw_frame_contract():
     from omegaconf import OmegaConf
     from pxr import Gf, Usd, UsdGeom
 
@@ -228,13 +228,13 @@ def test_task_mount_repositions_real_pad_in_the_original_grasp_plane_and_preserv
     for link_name, sign in (("link7", -1), ("link8", 1)):
         link = stage.GetPrimAtPath("/X5A/" + link_name)
         link_in_6 = cache.GetLocalToWorldTransform(link) * cache.GetLocalToWorldTransform(link6).GetInverse()
-        for manager, expected_x in ((legacy, 0.12157), (configured, 0.145)):
+        for manager, expected_x in ((legacy, 0.150070002), (configured, 0.145)):
             rotation = Gf.Rotation(Gf.Vec3d(0, 0, 1), 180 if sign > 0 else 0)
             mount = Gf.Matrix4d(1).SetRotate(rotation)
             mount.SetTranslateOnly(Gf.Vec3d(manager._mount_translation(sign)))
             center = (mount * link_in_6).Transform(Gf.Vec3d(0, 0, 0.06776))
             assert center[0] == pytest.approx(expected_x, abs=1e-8)
-        assert legacy._mount_translation(sign) == (0.035, sign * 0.024, -0.06776)
+        assert legacy._mount_translation(sign) == (0.063500002, sign * 0.024, -0.068956808)
         assert configured._mount_translation(sign) == (0.05843, sign * 0.024, -0.06776)
 
 

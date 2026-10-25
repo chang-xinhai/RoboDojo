@@ -211,7 +211,7 @@ def verify_task_scene(scene_manager, layout, env_id=0):
                 f"Task scene has {physical_type_counts[physical_type]} {physical_type}Object wrappers "
                 f"but saved layout requires {expected_count}; shared storage count cannot prove physical type"
             )
-    return {
+    result = {
         "env_id": int(env_id),
         "expected_object_counts": expected,
         "actual_object_counts": actual,
@@ -226,3 +226,81 @@ def verify_task_scene(scene_manager, layout, env_id=0):
             getattr(scene_manager, "_inactive_scene_object_names", [set()] * (env_id + 1))[env_id]
         ),
     }
+    manager = getattr(scene_manager, "layout_manager", None)
+    if manager is not None and hasattr(manager, "get_layout_records"):
+        records = {
+            kind: manager.get_layout_records(env_id, kind) for kind in OBJECT_STORAGES
+        }
+        result["semantic_objects"] = bind_semantic_objects(layout, records, result)
+    return result
+
+
+def bind_semantic_objects(layout, records, scene):
+    """Bind live instances through layout records, never through USD name suffixes."""
+    expected = {}
+    for kind in OBJECT_STORAGES:
+        for category, items in layout.get(kind, {}).items():
+            for item in items:
+                label = item.get("label")
+                if not isinstance(label, str) or not label or label in expected:
+                    raise ValueError("Layout semantic labels must be unique and nonempty")
+                expected[label] = (kind, category, item["category_idx"])
+    bound = {}
+    used_paths = set()
+    for kind, items in records.items():
+        for item in items:
+            label = item.get("label")
+            identity = (kind, item.get("category"), item.get("category_idx"))
+            if label not in expected or expected[label] != identity or label in bound:
+                raise ValueError(f"Invalid/duplicate semantic layout identity: {label!r} {identity}")
+            paths = [path for path, wrapper in scene["wrapper_types"].items()
+                     if wrapper["instance_name"] == item["inst_name"]
+                     and wrapper["physical_type"] == kind]
+            if len(paths) != 1 or paths[0] in used_paths:
+                raise ValueError(f"Semantic object {label!r} lacks one unique live body")
+            path = paths[0]
+            used_paths.add(path)
+            bound[label] = dict(
+                label=label, physical_type=kind, category=identity[1], category_idx=identity[2],
+                prim_path=path, **scene["live_placements"][path],
+            )
+    if set(bound) != set(expected) or used_paths != set(scene["live_placements"]):
+        raise ValueError("Semantic object identity is incomplete")
+    return bound
+
+
+def compare_reset_state(initial, reset, robot_errors):
+    """Keep existing 1 cm / .01 rad tolerances, fail closed on incomplete evidence."""
+    before = initial.get("semantic_objects", {})
+    after = reset.get("semantic_objects", {})
+    same = bool(before) and set(before) == set(after)
+    for scene, objects in ((initial, before), (reset, after)):
+        counts = scene.get("expected_object_counts", {})
+        if not counts or sum(counts.values()) != len(objects):
+            same = False
+    errors = {}
+    identity_fields = ("label", "physical_type", "category", "category_idx")
+    if same:
+        for label, obj in before.items():
+            other = after[label]
+            if (obj.get("label") != label or other.get("label") != label
+                    or any(obj.get(key) is None or obj.get(key) != other.get(key) for key in identity_fields)):
+                same = False
+            a = np.asarray(obj.get("relative_center"), dtype=float)
+            b = np.asarray(other.get("relative_center"), dtype=float)
+            if a.shape != (3,) or b.shape != (3,) or not np.isfinite([a, b]).all():
+                same = False
+                continue
+            errors[label] = float(np.max(np.abs(a - b)))
+    maximum = max(errors.values()) if errors else None
+    joints_ok = set(robot_errors) == {"left", "right"} and all(
+        np.isfinite(error) and error <= 0.01 and error >= 0 for error in robot_errors.values()
+    )
+    return dict(
+        same_task_objects=bool(same), object_center_errors_m=errors,
+        maximum_object_center_error_m=maximum, robot_joint_reset_errors_rad=robot_errors,
+        passed=bool(same and len(errors) == len(before)
+                    and initial.get("placement_verified") is True
+                    and reset.get("placement_verified") is True
+                    and maximum is not None and maximum <= 0.01 and joints_ok),
+    )

@@ -24,7 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from reproduction.visualize_multimodal import metric_color
 from utils.multimodal import SCHEMA_VERSION
-from utils.multimodal_hdf5 import HDF5Reader
+from utils.multimodal_hdf5 import HDF5Reader, validate_hdf5
+from utils.episode_success_gate import is_official_target_task, require_export_evidence
 from utils.save_file import VideoStreamWriter
 
 PADS = tuple((side, finger) for side in ("left", "right") for finger in ("finger_0", "finger_1"))
@@ -147,7 +148,14 @@ def unified_preview(frame, index, count, initial_timestamp_ns, *, width=1920, de
     if not np.isfinite((low, high)).all() or not 0 <= low < high:
         raise ValueError("Depth display range must be finite and increasing")
     header, label_h, scale_h, gap, footer_h = 100, 36, 24, 16, 40
-    cam_w = width // 5
+    nslv2 = all(camera.get("provenance", {}).get("depth_sl_method") == "nsl_v2" for camera in frame["vision"].values())
+    fields = VISION_FIELDS if nslv2 else VISION_FIELDS[:-1]
+    labels = (
+        ("RGB", "Depth GT (RGB)", "IR left", "IR right", "NSLv2 depth (IR)")
+        if nslv2
+        else ("RGB", "Depth GT (RGB)", "IR left", "IR right")
+    )
+    cam_w = width // len(fields)
     image_h = cam_w * 3 // 4
     row_h = label_h + image_h + scale_h
     tactile_y = header + 3 * row_h + gap
@@ -161,7 +169,7 @@ def unified_preview(frame, index, count, initial_timestamp_ns, *, width=1920, de
         draw.text((x, y), value, font=_fit_font(draw, value, max_w, preferred or size), fill=color)
 
     stamp = frame["sync"]["timestamp_ns"]
-    text(12, 8, "INSERT TUBES | ALL MODALITIES", width - 24, preferred=size + 6)
+    text(12, 8, "TASK REPLAY | RECORDED MODALITIES", width - 24, preferred=size + 6)
     text(
         12,
         42,
@@ -170,8 +178,7 @@ def unified_preview(frame, index, count, initial_timestamp_ns, *, width=1920, de
         width - 24,
         "#bcd7e8",
     )
-    nslv2 = all(camera.get("provenance", {}).get("depth_sl_method") == "nsl_v2" for camera in frame["vision"].values())
-    sl_label = "SL: NSLv2 prediction" if nslv2 else "SL: recorded input"
+    sl_label = "NSLv2 depth prediction" if nslv2 else "NSLv2 inference not requested"
     text(
         12,
         72,
@@ -187,10 +194,9 @@ def unified_preview(frame, index, count, initial_timestamp_ns, *, width=1920, de
         content.paste(contained, ((w - contained.width) // 2, (h - contained.height) // 2))
         canvas.paste(content, (x, y))
 
-    labels = ("RGB", "Depth GT (RGB)", "IR left", "IR right", "NSLv2 depth (IR)" if nslv2 else "SL depth (left IR)")
     for row, name in enumerate(("head", "left_wrist", "right_wrist")):
         camera = frame["vision"][name]
-        for col, (field, label) in enumerate(zip(VISION_FIELDS, labels)):
+        for col, (field, label) in enumerate(zip(fields, labels, strict=True)):
             x, y = col * cam_w, header + row * row_h
             draw.rectangle((x, y, x + cam_w - 1, y + label_h - 1), fill="#192a3a")
             text(x + 8, y + 7, f"{name.replace('_', ' ').upper()} | {label}", cam_w - 16)
@@ -271,6 +277,13 @@ def export_episode_video(
                 raise ValueError("Full-episode video requires a completed recording; partial recordings are refused")
             if reader.handle.attrs["observation_schema"] != SCHEMA_VERSION:
                 raise ValueError("Task video requires three RGB cameras and bilateral TacSL, not component data")
+            metadata = reader.metadata
+            run = metadata["run"]
+            if is_official_target_task(run.get("task")) or run.get("official_episode") or run.get(
+                "expert_controller", {}
+            ).get("enabled"):
+                integrity = validate_hdf5(source)
+                require_export_evidence(run, metadata["validation"], integrity)
             if require_nslv2:
                 run = reader.metadata["run"]
                 if run.get("scope") == "keyframe_subset_commissioning" or run.get("source_capture", {}).get(
@@ -278,11 +291,23 @@ def export_episode_video(
                 ) != len(reader):
                     raise ValueError("A full NSLv2 task video cannot use a commissioning subset of its source episode")
             first, last, interval = _timeline(reader)
+            first_frame = reader.read_frame(0)
+            nslv2_recorded = all(
+                camera.get("provenance", {}).get("depth_sl_method") == "nsl_v2"
+                for camera in first_frame["vision"].values()
+            )
+            vision_fields = VISION_FIELDS if nslv2_recorded else VISION_FIELDS[:-1]
             fps = 1e9 / interval
             contact_counts = {f"{side}.{finger}": 0 for side, finger in PADS}
             conditioned_counts = dict.fromkeys(contact_counts, 0)
             for index in range(len(reader)):
                 frame = reader.read_frame(index)
+                frame_nslv2 = all(
+                    camera.get("provenance", {}).get("depth_sl_method") == "nsl_v2"
+                    for camera in frame["vision"].values()
+                )
+                if frame_nslv2 != nslv2_recorded:
+                    raise ValueError(f"NSLv2 capture mode changed inside source episode at frame {index}")
                 if require_nslv2 and any(
                     camera.get("provenance", {}).get("depth_sl_method") != "nsl_v2"
                     for camera in frame["vision"].values()
@@ -373,7 +398,7 @@ def export_episode_video(
                 "contact_conditioned_frames_by_pad": conditioned_counts,
                 "contact_active_frames_by_pad": contact_counts,
                 "views": (
-                    [f"{name}.{field}" for name in ("head", "left_wrist", "right_wrist") for field in VISION_FIELDS]
+                    [f"{name}.{field}" for name in ("head", "left_wrist", "right_wrist") for field in vision_fields]
                     + list(contact_counts)
                     if layout == "unified"
                     else ["head.rgb", "left_wrist.rgb", "right_wrist.rgb", *contact_counts]
@@ -386,7 +411,12 @@ def export_episode_video(
                 },
                 "depth_display_range_m": list(depth_range) if layout == "unified" else None,
                 "invalid_depth_display_rgb": [130, 0, 130] if layout == "unified" else None,
-                "structured_light_source": reader.metadata["run"].get("nslv2", "recorded depth_sl"),
+                "structured_light_source": (
+                    "NSLv2 learned metric depth"
+                    if nslv2_recorded
+                    else "recorded stereo IR and GT depth; NSLv2 inference not requested"
+                ),
+                "nslv2_depth_recorded": nslv2_recorded,
                 "nslv2_required_and_verified_every_frame": require_nslv2,
                 "tactile_view": tactile_view,
                 "tactile_rgb_field": "raw_optical_rgb" if tactile_view == "continuous" else "rgb",

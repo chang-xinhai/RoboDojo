@@ -295,6 +295,10 @@ class StructuredLightCapture:
         from pxr import Gf, Sdf, UsdGeom, UsdLux
 
         self.manager, self.config = manager, dict(config)
+        inference_enabled = self.config.get("nsl_v2", {}).get("enabled", True)
+        if not isinstance(inference_enabled, bool):
+            raise ValueError("structured_light.nsl_v2.enabled must be a boolean")
+        self.inference_enabled = inference_enabled
         self.stage = get_current_stage()
         self.baseline = float(config.get("baseline_m", 0.05))
         if not np.isfinite(self.baseline) or self.baseline <= 0:
@@ -398,7 +402,8 @@ class StructuredLightCapture:
         # Acquire only after camera authoring succeeds. A model startup failure
         # must release the authored render products as well as its worker.
         try:
-            self.depth_client = create_nslv2_client(config)
+            if self.inference_enabled:
+                self.depth_client = create_nslv2_client(config)
         except BaseException:
             self.destroy()
             raise
@@ -666,16 +671,26 @@ class StructuredLightCapture:
                     else native_sim.current_time_step_index
                 )
                 actual_baseline = float(relative[0, 3])
-                depth_sl, nslv2_provenance = infer_nslv2_depth(
-                    self.depth_client,
-                    ir["ir_left"],
-                    ir["ir_right"],
-                    fx_px=k[0, 0],
-                    baseline_m=actual_baseline,
-                    stamp_ns=timestamp_ns,
-                    frame_index=frame_index,
-                    camera=name,
-                )
+                if self.depth_client is not None:
+                    depth_sl, nslv2_provenance = infer_nslv2_depth(
+                        self.depth_client,
+                        ir["ir_left"],
+                        ir["ir_right"],
+                        fx_px=k[0, 0],
+                        baseline_m=actual_baseline,
+                        stamp_ns=timestamp_ns,
+                        frame_index=frame_index,
+                        camera=name,
+                    )
+                    depth_sl_method = "nsl_v2"
+                    depth_sl_description = "nsl_v2_learned_metric_depth"
+                    depth_sl_backend = "nsl_v2"
+                else:
+                    depth_sl = np.full(shape, np.nan, dtype=np.float32)
+                    nslv2_provenance = {"status": "not_requested"}
+                    depth_sl_method = "not_requested"
+                    depth_sl_description = "not_recorded_nslv2_inference_disabled"
+                    depth_sl_backend = "not_requested"
                 transforms = {view: model["T_world_from_optical"] for view, model in models.items()}
                 result[name] = dict(
                     rgb=rgb,
@@ -701,7 +716,7 @@ class StructuredLightCapture:
                         depth_gt_frame="rgb",
                         depth_sl_frame="ir_left",
                         depth_unit="m",
-                        depth_sl_backend="nsl_v2",
+                        depth_sl_backend=depth_sl_backend,
                         depth_sl_dtype="float32",
                         depth_sl_resolution_hw=list(depth_sl.shape),
                         depth_sl_invalid="NaN",
@@ -718,8 +733,8 @@ class StructuredLightCapture:
                         },
                         ir_spectral_model="visible_radiance_proxy_no_NIR_material_response",
                         depth_gt="distance_to_image_plane_ground_truth",
-                        depth_sl="nsl_v2_learned_metric_depth",
-                        depth_sl_method="nsl_v2",
+                        depth_sl=depth_sl_description,
+                        depth_sl_method=depth_sl_method,
                         nslv2=nslv2_provenance,
                         pattern=self.pattern,
                         pattern_sha256=self.pattern_sha256,

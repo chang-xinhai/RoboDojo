@@ -284,6 +284,10 @@ class NativeContactTrace:
             )
             + "\n"
         )
+        # Close mappings before unlinking on /mnt NFS. A loop-local reference
+        # otherwise keeps the last .npy open and creates an undeletable .nfs file.
+        for value in self._arrays.values():
+            value._mmap.close()
         self._arrays.clear()
         shutil.rmtree(self.scratch)
         self._closed = True

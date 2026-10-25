@@ -45,6 +45,9 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
         """Initialize a rigid body object with geometry and physics properties."""
         self.stage = prim.GetStage()
         self._prim_path = prim_path
+        from utils.authored_rigid_members import inspect_authored_members
+        self._authored_member_spec = inspect_authored_members(prim)
+        self._authored_member_readback = None
         prim_path_parts = prim_path.split("/")
         self.category_name = prim_path_parts[-2]
         self.instance_name = prim_path_parts[-1]
@@ -98,6 +101,14 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
         self._default_angular_velocity = [0.0, 0.0, 0.0]
 
         self._setup_physics()
+
+    def get_world_pose(self):
+        members = getattr(self, "_authored_member_readback", None)
+        return members.world_pose() if members is not None else SingleRigidPrim.get_world_pose(self)
+
+    def get_local_pose(self):
+        members = getattr(self, "_authored_member_readback", None)
+        return members.local_pose() if members is not None else SingleRigidPrim.get_local_pose(self)
 
     def _get_object_transform(self, device=None):
         """
@@ -217,6 +228,8 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
         self.set_local_pose(translation=self.default_pos, orientation=self.default_ori)
         self.set_local_scale(np.array(self.scale))
         self._apply_default_velocities()
+        if self._authored_member_readback is not None:
+            self._authored_member_readback.reset(self.default_pos, self.default_ori)
 
     def relocate_offscreen(self):
         """Move this object far away so stale prims do not affect the next layout."""
@@ -230,10 +243,15 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
         self.set_local_pose(translation=far_pos, orientation=self.default_ori)
         self.set_local_scale(np.array(self.scale))
         self._apply_default_velocities()
+        if self._authored_member_readback is not None:
+            self._authored_member_readback.reset(far_pos, self.default_ori)
 
     def initialize(self):
         self.physics_sim_view = SimulationManager.get_physics_sim_view()
         super().initialize(physics_sim_view=self.physics_sim_view)
+        if self._authored_member_spec is not None:
+            from utils.authored_rigid_members import AuthoredRigidMembers
+            self._authored_member_readback = AuthoredRigidMembers(self._authored_member_spec, self.physics_sim_view)
 
     def _apply_default_velocities(self):
         """Re-apply default linear/angular velocity if configured."""

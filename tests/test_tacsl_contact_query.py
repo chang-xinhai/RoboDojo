@@ -48,6 +48,7 @@ def test_explicit_warp_queries_real_surface_and_does_not_modify_original_physica
 
 def test_default_native_and_existing_host_readback_choices_remain_explicit():
     _, mesh = collider()
+    UsdPhysics.MeshCollisionAPI(mesh).CreateApproximationAttr("sdf")
     calls = []
     actual_native_handle = object()
     native = SimpleNamespace(create_sdf_shape_view=lambda *args: calls.append(args) or actual_native_handle)
@@ -74,6 +75,11 @@ def test_manager_explicit_warp_skips_all_sdf_schema_and_cooking_changes():
     legacy.contact_paths = manager.contact_paths
     legacy._prepare_sdf = calls.append
     legacy._prepare_contact_collisions()
+    assert calls == []
+    explicit = TactileManager(1, {"contact_query_backend": "physx_native_sdf"}, None, "cpu")
+    explicit.contact_paths = manager.contact_paths
+    explicit._prepare_sdf = calls.append
+    explicit._prepare_contact_collisions()
     assert calls == manager.contact_paths
 
 

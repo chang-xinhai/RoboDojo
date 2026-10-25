@@ -20,7 +20,11 @@ def _signed_mesh_distance(mesh: wp.uint64, points: wp.array3d(dtype=float), outp
         delta = point - closest
         distance = wp.length(delta)
         gradient = wp.normalize(delta) * query.sign
-        if distance < 1.0e-10:
+        # Subtracting nearly equal float32 coordinates at a surface produces
+        # an arbitrary normalized roundoff vector. Use the closest face normal
+        # only within eight coordinate ULPs; retain the measured distance.
+        roundoff = 8.0 * 1.1920928955078125e-7 * wp.max(wp.length(point), wp.length(closest))
+        if distance <= wp.max(1.0e-12, roundoff):
             gradient = wp.mesh_eval_face_normal(mesh, query.face)
         output[batch, index, 0] = gradient[0]
         output[batch, index, 1] = gradient[1]
@@ -64,19 +68,40 @@ class WarpTriangleMeshSdfView:
         self.device = device
 
     @classmethod
-    def from_usd(cls, prim, device):
+    def from_usd(cls, prim, device, *, point_transform=None):
         from pxr import UsdGeom
 
         mesh = UsdGeom.Mesh(prim)
         counts = np.asarray(mesh.GetFaceVertexCountsAttr().Get(), dtype=np.int32)
-        if not len(counts) or not np.all(counts == 3):
-            raise ValueError(f"TacSL readback mesh must be triangulated: {prim.GetPath()}")
+        if not len(counts) or not np.isin(counts, (3, 4)).all():
+            raise ValueError(f"TacSL readback mesh requires triangles or planar convex quads: {prim.GetPath()}")
         if mesh.GetHoleIndicesAttr().Get():
             raise ValueError(f"TacSL readback mesh holes require explicit collision triangles: {prim.GetPath()}")
-        faces = np.asarray(mesh.GetFaceVertexIndicesAttr().Get(), dtype=np.int32).reshape(-1, 3)
+        points = np.asarray(mesh.GetPointsAttr().Get(), dtype=np.float64)
+        indices = np.asarray(mesh.GetFaceVertexIndicesAttr().Get(), dtype=np.int32)
+        faces, offset = [], 0
+        for count in counts:
+            face = indices[offset:offset+count]
+            offset += count
+            if count == 4:
+                p = points[face]
+                normal = np.cross(p[1]-p[0], p[2]-p[0])
+                extent = np.linalg.norm(np.ptp(p, axis=0))
+                if (np.linalg.norm(normal) == 0 or extent == 0
+                        or abs(np.dot(p[3]-p[0], normal)) > 1e-6 * extent * np.linalg.norm(normal)
+                        or any(np.dot(np.cross(p[(i+1)%4]-p[i], p[(i+2)%4]-p[(i+1)%4]), normal) < 0
+                               for i in range(4))):
+                    raise ValueError(f"TacSL rejects nonplanar/nonconvex query quad: {prim.GetPath()}")
+            faces.extend([face[[0, i, i+1]] for i in range(1, count-1)])
+        faces = np.asarray(faces, dtype=np.int32)
         if mesh.GetOrientationAttr().Get() == "leftHanded":
             faces = faces[:, ::-1].copy()
-        return cls(mesh.GetPointsAttr().Get(), faces, device)
+        if point_transform is not None:
+            matrix = np.asarray(point_transform, dtype=np.float64)
+            if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
+                raise ValueError("TacSL requires a finite4x4 query transform")
+            points = (np.c_[points, np.ones(len(points))] @ matrix)[:, :3]
+        return cls(points, faces, device)
 
     def get_sdf_and_gradients(self, points):
         tensor = wp.to_torch(points) if isinstance(points, wp.array) else points

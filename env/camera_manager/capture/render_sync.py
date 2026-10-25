@@ -28,6 +28,9 @@ not advance physics.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import sys
+
 import numpy as np
 
 _DISPATCHER_PATH = "/Render/PostProcess/SDGPipeline/PostProcessDispatcher"
@@ -56,16 +59,17 @@ class RenderProductDeliveryFence:
     Zero-delay Kit settings fence downstream annotator dispatch before reads.
     """
 
-    def __init__(self, sensors):
+    def __init__(self, sensors=(), *, render_products=()):
         import carb.eventdispatcher
         import omni.hydratexture
 
-        self.counts = [0] * len(sensors)
+        products = [sensor._hydra_texture for sensor in sensors] + list(render_products)
+        self.counts = [0] * len(products)
         self.subscriptions = []
         self.paths = []
-        for index, sensor in enumerate(sensors):
-            texture = sensor._hydra_texture.hydra_texture
-            self.paths.append(str(sensor._hydra_texture.path))
+        for index, product in enumerate(products):
+            texture = product.hydra_texture
+            self.paths.append(str(product.path))
 
             def on_event(event, camera_index=index):
                 del event
@@ -84,6 +88,38 @@ class RenderProductDeliveryFence:
 
     def close(self):
         self.subscriptions.clear()
+
+
+@contextmanager
+def _requested_product_streaming_scope():
+    """Let the bounded native-product fence own readiness during acquisition.
+
+    Lab 3's global streaming-idle wait can remain busy across sensor/material
+    edits, even after requested products deliver. Keep its synchronous update,
+    then require real product completions, ready payloads and finished USD file
+    loads in wait_for_camera_data. Never change the global policy outside it.
+    """
+    native = sys.modules.get("isaaclab_physx.renderers.isaac_rtx_renderer_utils")
+    if native is None:
+        yield
+        return
+    from omni.kit.app import get_app
+
+    original = native._wait_for_streaming_complete
+    native._wait_for_streaming_complete = lambda: get_app().update()
+    try:
+        yield
+    finally:
+        native._wait_for_streaming_complete = original
+
+
+def _pending_stage_files():
+    if "isaaclab_physx.renderers.isaac_rtx_renderer_utils" not in sys.modules:
+        return []
+    from omni.usd import get_context
+
+    message, loaded, total = get_context().get_stage_loading_status()
+    return [f"USD files loading {loaded}/{total}: {message}"] if loaded < total else []
 
 
 def ensure_camera_color_render_enabled(settings=None):
@@ -130,6 +166,22 @@ def pending_camera_payloads(data):
 
 
 def wait_for_camera_data(env, read_data, *, physics_state, min_passes=1, max_passes=32, delivery_clock=None):
+    """Acquire ready payloads behind a bounded, independently observed fence."""
+    if delivery_clock is not None:
+        if not zero_delay_active():
+            raise RuntimeError("Native-product acquisition requires synchronous zero-delay rendering")
+        with _requested_product_streaming_scope():
+            return _wait_for_camera_data(
+                env, read_data, physics_state=physics_state, min_passes=min_passes,
+                max_passes=max_passes, delivery_clock=delivery_clock,
+            )
+    return _wait_for_camera_data(
+        env, read_data, physics_state=physics_state, min_passes=min_passes,
+        max_passes=max_passes, delivery_clock=delivery_clock,
+    )
+
+
+def _wait_for_camera_data(env, read_data, *, physics_state, min_passes=1, max_passes=32, delivery_clock=None):
     """Bounded render-only wait for actual requested image buffers at one physics state.
 
     A dispatcher delivery alone does not mean a newly created render product
@@ -146,6 +198,8 @@ def wait_for_camera_data(env, read_data, *, physics_state, min_passes=1, max_pas
         try:
             data = read_data()
             pending = pending_camera_payloads(data)
+            if delivery_clock is not None:
+                pending += _pending_stage_files()
         except CameraFrameNotReady as exc:
             pending = [str(exc)]
         if not pending:

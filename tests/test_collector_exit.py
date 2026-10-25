@@ -33,6 +33,7 @@ class App:
 
 class Launcher:
     def __init__(self, args):
+        if mode == "expert_validate_launch_failure": raise RuntimeError("deliberate launcher failure")
         self.app = App()
     @staticmethod
     def add_app_launcher_args(parser):
@@ -65,7 +66,11 @@ class Env:
         else:
             assert cfg.tactile.get("compliance_stiffness", 1500.) == 1500.
         self.contact_fixtures = SimpleNamespace(config=contact_config if mode.startswith("contact_") else None)
-        self.tactile_manager = SimpleNamespace()
+        self.tactile_manager = SimpleNamespace(sensors={})
+        self.camera_manager = SimpleNamespace(
+            camera_names=[["cam_head", "cam_left_wrist", "cam_right_wrist"]],
+            initialize_multimodal=lambda: SimpleNamespace(rigs={0: {name: {} for name in
+                ("cam_head", "cam_left_wrist", "cam_right_wrist")}}, inference_enabled=True))
         assert cfg.saved_layouts[0]["Rigid"]["test_object"], "Layout must exist before task construction"
         assert list(cfg.sim.seed) == [3] and kwargs["seed"] == 3
         assert cfg.eval_cfg.seed == 2 and cfg.eval_cfg.episode_seed == 3
@@ -78,6 +83,8 @@ class Env:
             assert list(cfg.tactile.contact_object_labels) == ["tube0", "tube1", "tube2"]
             task_env = self
             class Rewards:
+                def get_reward(self, final_check=True): return [1.0]
+                def get_score(self, reward_lst=None): return [1.0]
                 def init_state(self):
                     assert task_env.success == [True], "episode validity must precede reward initialization"
                 def call_func_parser(self, check, env_idx):
@@ -91,7 +98,8 @@ class Env:
         assert cfg.camera.default_frequency == 25
         self.lifecycle = []
         self.robot_manager = SimpleNamespace(
-            set_origin_endpose=self.set_origin_endpose, set_robot_init_state=self.set_robot_init_state)
+            set_origin_endpose=self.set_origin_endpose, set_robot_init_state=self.set_robot_init_state,
+            get_robot_by_arm_name=lambda name: name, get_joint=lambda robot, indices: [[0.2 if mode == "expert_reset_failure" else 0.] * 6])
         objects = {} if mode == "empty_scene" else {"test": RigidObject(prim_path="/World/test")}
         if mode.startswith("expert_"):
             import numpy as np
@@ -110,6 +118,7 @@ class Env:
             self.tactile_manager = SimpleNamespace(contact_paths_by_env=[paths], sensors={
                 side: {finger: {0: [sensor(path) for path in paths]} for finger in ("finger_0", "finger_1")}
                 for side in ("left", "right")})
+        self.tactile_manager.enable_camera_tactile = True
         self.scene_manager = SimpleNamespace(
             _rigid_and_dynamic_objects=[objects],
             stage=SimpleNamespace(GetPrimAtPath=lambda path: SimpleNamespace(IsValid=lambda: True)),
@@ -117,7 +126,11 @@ class Env:
         )
         if mode.startswith("expert_"):
             self.scene_manager.layout_manager = SimpleNamespace(
-                get_instance_name=lambda env_idx, label: "test_" + label[-1])
+                get_instance_name=lambda env_idx, label: "test_" + label[-1],
+                get_layout_records=lambda env_idx, kind: [
+                    dict(label=f"tube{i}", category="test_object", category_idx=i, inst_name=f"test_{i}")
+                    for i in range(3)
+                ] if kind == "Rigid" else [])
         self.reset_complete = False
         self.placed = False
         self.sim = SimpleNamespace(sim=PhysicsContext())
@@ -156,6 +169,7 @@ class Obs:
     def initialize(self, env):
         self.env = env
     def get_obs(self):
+        assert not mode.startswith("expert_validate"), "validate-only read episode sensors"
         assert self.env.placed, "Objects were left in reset offscreen staging"
         assert self.env.lifecycle[-2:] == [["origin"], ["history"]], "Robot episode history not initialized"
         frame = fixture(self.env.sim.sim.frame)
@@ -214,6 +228,7 @@ if mode.startswith("expert_"):
             env.reward_manager.init_state()
             assert args.expert_trajectory.name == "official-commands.npz"
             self.command = None
+            self.initial_native = {side: {"arm_positions_rad": [0.] * 6} for side in ("left", "right")}
         @property
         def finished(self): return self.env.sim.sim.frame >= 3 and mode != "expert_timeout"
         def configuration(self): return {"synthetic_cpu_fixture": True, "native_task_commands_only": True}
@@ -224,14 +239,18 @@ if mode.startswith("expert_"):
             return {"physics_frame": self.env.sim.sim.frame,
                     "timestamp_ns": round(self.env.sim.sim.frame * .04 * 1e9),
                     "last_command": self.command}
-        def validate(self): return {"passed": mode != "expert_validation_failure"}
-    install("_test_expert", Controller=ExpertController)
+        def validate(self):
+            if mode == "expert_validate_exception": raise RuntimeError("deliberate validate exception")
+            return {"passed": mode not in ("expert_validation_failure", "expert_validate_failure")}
+    install("utils.insert_tubes_expert", InsertTubesExpert=ExpertController)
     import utils.native_contact_trace as trace_module
     trace_module.query_native_sdf = lambda sensor: sensor.raw_sdf
     trace_module.native_task_inventory = lambda env: {"synthetic_cpu_fixture": True,
         "physics_frame": env.sim.sim.frame, "no_gpu_evidence": True}
 layout_file = Path(output) / "test-layout.json"
-layout_file.write_text(json.dumps({"Rigid": {"test_object": [{}] * (3 if mode.startswith("expert_") else 1)}}))
+layout_file.write_text(json.dumps({"Rigid": {"test_object": [
+    dict(label=f"tube{i}", category_idx=i) for i in range(3)
+] if mode.startswith("expert_") else [{}]}}))
 sys.argv = ["collect_multimodal.py", "--task", "make_kong", "--frames", "1", "--warmup-steps", "0", "--output", output,
             "--layout-file", str(layout_file), "--layout-id", "3", "--eval-seed", "2"]
 if mode.startswith("contact_"):
@@ -240,8 +259,38 @@ if mode.startswith("contact_"):
 if mode.startswith("expert_"):
     sys.argv[sys.argv.index("--task") + 1] = "insert_tubes"
     sys.argv[sys.argv.index("--frames") + 1] = "6"
-    sys.argv += ["--expert-controller", "_test_expert:Controller",
+    sys.argv += ["--expert-controller", "utils.insert_tubes_expert:InsertTubesExpert",
                  "--expert-trajectory", str(Path(output) / "official-commands.npz")]
+if mode.startswith("expert_"):
+    # Synthetic CPU fixture evidence, never a real-runtime validation claim.
+    from utils.episode_success_gate import SCHEMA, request_identity, publish_validation
+    trajectory = Path(output) / "official-commands.npz"
+    trajectory.write_bytes(b"synthetic CPU command source")
+    if mode.startswith("expert_validate"):
+        sys.argv += ["--mode", "validate-only"]
+        import utils.multimodal_hdf5 as hdf_module
+        def forbidden_writer(*args, **kwargs): raise AssertionError("validate-only created writer")
+        hdf_module.HDF5Writer = forbidden_writer
+    else:
+        identity_args = SimpleNamespace(task="insert_tubes", env_cfg="arx_x5_multimodal",
+            layout_config="arx_x5", layout_id=3, eval_seed=2, layout_file=layout_file,
+            expert_trajectory=trajectory, expert_controller="utils.insert_tubes_expert:InsertTubesExpert",
+            expert_gripper_closed_target=None, expert_time_scale=1.0, expert_settle_seconds=2.0,
+            expert_initial_hold_seconds=0.5, warmup_steps=0, frames=6, enable_planner=False,
+            disable_nslv2=False, min_sl_valid_fraction=0.001)
+        pre = dict(schema=SCHEMA, status="passed", identity=request_identity(identity_args, Path.cwd()),
+            expert_episode=dict(passed=True, controller_finished=True, task_success_flag=True,
+                official_task_success=True, official_task_reward=1.0, official_task_score=1.0),
+            post_replay_reset=dict(passed=True, routine="reset_task_episode"), synthetic_cpu_fixture=True)
+        pre_path = publish_validation(Path(output) / "prevalidation", pre)
+        sys.argv += ["--validation-report", str(pre_path)]
+    if mode == "expert_integrity_failure":
+        import utils.multimodal_hdf5 as hdf_module
+        def failed_integrity(path, **kwargs):
+            assert str(path).endswith(".partial"), "integrity checked after publication"
+            assert not (Path(output) / "episode.hdf5").exists()
+            raise ValueError("deliberate partial integrity failure")
+        hdf_module.validate_hdf5 = failed_integrity
 if mode == "visualization_failure":
     sys.argv.append("--visualize")
 runpy.run_path("reproduction/collect_multimodal.py", run_name="__main__")
@@ -257,6 +306,69 @@ class CollectorExitTests(unittest.TestCase):
             text=True,
             timeout=30,
         )
+
+    def test_validate_only_runs_controller_and_reset_without_sensor_frames_or_writer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_collector("expert_validate_only", directory)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            reports = list(Path(directory).glob("*-validation-only-*.json"))
+            self.assertEqual(len(reports), 1)
+            report = json.loads(reports[0].read_text())
+            self.assertEqual(report["frames"], [])
+            self.assertTrue(report["expert_episode"]["official_task_success"])
+            self.assertTrue(report["post_replay_reset"]["passed"])
+            self.assertFalse(list(Path(directory).glob("*.hdf5*")))
+            self.assertFalse(list(Path(directory).glob("*.mp4")))
+            self.assertFalse((Path(directory) / "native-contact-trace.npz").exists())
+
+    def test_prevalidation_failure_preserves_diagnostics_and_resets_without_recording(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_collector("expert_validate_failure", directory)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("successful complete episode", result.stderr)
+            reports = list(Path(directory).glob("*-validation-only-*.json"))
+            self.assertEqual(len(reports), 1)
+            report = json.loads(reports[0].read_text())
+            self.assertEqual(report["status"], "failed")
+            self.assertFalse(report["expert_episode"]["passed"])
+            self.assertEqual(report["expert_episode"]["official_task_reward"], 1.0)
+            self.assertEqual(report["expert_episode"]["official_task_score"], 1.0)
+            self.assertIn("successful complete episode", report["exception"]["message"])
+            self.assertTrue(report["post_replay_reset"]["attempted"])
+            self.assertTrue(report["post_replay_reset"]["passed"])
+            self.assertTrue(report["terminal_state"]["controller_finished"])
+            self.assertFalse(list(Path(directory).glob("*.mp4")))
+            self.assertFalse((Path(directory) / "native-contact-trace.npz").exists())
+            self.assertFalse(list(Path(directory).glob("*.hdf5*")))
+
+    def test_validation_exceptions_are_written_without_capture(self):
+        for mode in ("expert_validate_launch_failure", "expert_validate_exception"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                result = self.run_collector(mode, directory)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                reports = list(Path(directory).glob("*-validation-only-*.json"))
+                self.assertEqual(len(reports), 1)
+                report = json.loads(reports[0].read_text())
+                self.assertEqual(report["status"], "failed")
+                if mode.endswith("launch_failure"):
+                    self.assertIn("launcher failure", report["exception"]["message"])
+                    self.assertFalse(report["post_replay_reset"]["attempted"])
+                else:
+                    self.assertIn("validate exception", report["expert_episode"]["exception"]["message"])
+                    self.assertTrue(report["post_replay_reset"]["passed"])
+                self.assertFalse(list(Path(directory).glob("*.hdf5*")))
+                self.assertFalse(list(Path(directory).glob("*.mp4")))
+
+    def test_reset_or_partial_integrity_failure_preserves_partial(self):
+        for mode, reason in (("expert_reset_failure", "Post-replay task reset"),
+                             ("expert_integrity_failure", "deliberate partial integrity failure")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                result = self.run_collector(mode, directory)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(reason, result.stderr)
+                self.assertTrue((Path(directory) / "episode.hdf5.partial").exists())
+                self.assertFalse((Path(directory) / "episode.hdf5").exists())
+                self.assertFalse((Path(directory) / "manifest.json").exists())
 
     def test_expert_episode_initial_and_terminal_capture_and_official_validation(self):
         from utils.multimodal_hdf5 import HDF5Reader

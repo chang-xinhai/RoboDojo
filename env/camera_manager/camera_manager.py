@@ -446,7 +446,7 @@ class CameraManager:
 
         return
 
-    def reset(self):
+    def reset(self, *, render=True):
         """
         Reset the camera manager for specific environments.
         This method should only be called when resetting the environment.
@@ -459,7 +459,7 @@ class CameraManager:
         self.post_init()
         env_id_list = list(range(self.num_envs))
         self.init_camera_pose(env_ids=env_id_list)
-        self.sim.sim_step()
+        self.sim.sim_step(render=render)
 
     def get_camera_intrinsics(self, cam_id: int, env_id: int = 0) -> np.ndarray:
         """
@@ -500,6 +500,18 @@ class CameraManager:
         T[:3, 3] = pos
         return T
 
+    def initialize_multimodal(self):
+        """Author the normal stereo rigs without reading episode sensor data."""
+        if not self.structured_light_enabled:
+            raise RuntimeError("Select a camera profile with structured_light.enabled=true")
+        if self._structured_light_capture is None:
+            from env.camera_manager.structured_light import StructuredLightCapture
+
+            self._structured_light_capture = StructuredLightCapture(
+                self, OmegaConf.to_container(self.init_config.structured_light, resolve=True)
+            )
+        return self._structured_light_capture
+
     def capture_multimodal(self, env_id: int = 0) -> dict:
         """Capture RGB, ground truth depth, projected stereo IR and SL depth.
 
@@ -511,10 +523,4 @@ class CameraManager:
             raise RuntimeError("Select a camera profile with structured_light.enabled=true")
         if not 0 <= env_id < self.num_envs:
             raise IndexError(f"env_id {env_id} exceeds num_envs {self.num_envs}")
-        if self._structured_light_capture is None:
-            from env.camera_manager.structured_light import StructuredLightCapture
-
-            self._structured_light_capture = StructuredLightCapture(
-                self, OmegaConf.to_container(self.init_config.structured_light, resolve=True)
-            )
-        return self._structured_light_capture.capture(env_id)
+        return self.initialize_multimodal().capture(env_id)
