@@ -12,7 +12,7 @@ import numpy as np
 from omegaconf import DictConfig
 import omni.kit.commands
 import omni.usd
-from pxr import Gf, Sdf, UsdGeom, UsdPhysics, UsdShade
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 import torch
 
 
@@ -88,6 +88,18 @@ class GeometryObject(SingleGeometryPrim):
             dynamic_friction=self.physics_config.get("dynamic_friction", 0.0),
             restitution=self.physics_config.get("restitution", 0.5),
         )
+        # Mesh cooking happens while SingleGeometryPrim enables collision.
+        # Apply a task-requested approximation before that call; changing the
+        # USD attribute afterwards leaves PhysX using the authored cooking mode.
+        collision_approximation = self.physics_config.get("collision_approximation")
+        if collision_approximation:
+            self._set_collision_approximation_on_meshes(str(collision_approximation))
+        # Respect an explicit collision=false even when an authored USD mesh
+        # already carries PhysicsCollisionAPI=true. SingleGeometryPrim's
+        # collision flag does not remove child mesh collision schemas, so set
+        # every authored collision mesh before PhysX cooking.
+        if collision is False:
+            self._set_collision_enabled_on_meshes(False)
         super().__init__(
             prim_path=prim_path,
             name=self.instance_name,
@@ -101,6 +113,11 @@ class GeometryObject(SingleGeometryPrim):
             disable_stablization=disable_stablization,
             contact_filter_prim_paths_expr=contact_filter_prim_paths_expr,
         )
+        # Some task assets contain narrow holes or thin collision walls. The
+        # default Isaac Sim cooking approximation can fill those holes and
+        # eject a nearby dynamic body on the first physics step. Keep the
+        # existing default for all tasks, but allow a task asset to request
+        # the authored mesh approximation explicitly.
         self._remove_rigid_body_if_exists(prim_path)
         self._current_color = self.visual_config.get("color", None)
         if self._current_color is not None:
@@ -129,6 +146,26 @@ class GeometryObject(SingleGeometryPrim):
             for attr_name in attributes_to_remove:
                 if prim.HasAttribute(attr_name):
                     prim.RemoveProperty(attr_name)
+
+    def _set_collision_enabled_on_meshes(self, enabled: bool) -> None:
+        """Set collision enabled on authored child meshes before cooking."""
+        root = get_prim_at_path(self._prim_path)
+        if not root or not root.IsValid():
+            return
+        for prim in Usd.PrimRange(root):
+            if prim.IsA(UsdGeom.Mesh) or prim.HasAPI(UsdPhysics.CollisionAPI):
+                UsdPhysics.CollisionAPI.Apply(prim).CreateCollisionEnabledAttr().Set(bool(enabled))
+
+    def _set_collision_approximation_on_meshes(self, approximation: str) -> None:
+        """Set the PhysX mesh cooking mode for every authored collision mesh."""
+        root = get_prim_at_path(self._prim_path)
+        if not root or not root.IsValid():
+            return
+        for prim in Usd.PrimRange(root):
+            if not prim.IsA(UsdGeom.Mesh):
+                continue
+            api = UsdPhysics.MeshCollisionAPI(prim)
+            api.GetApproximationAttr().Set(approximation)
 
     def _extract_env_id_from_prim_path(self):
         """get env_id from prim_path"""
