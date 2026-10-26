@@ -1,0 +1,48 @@
+Rigid:
+  -
+    common:
+      xlim: [0.40, 0.40]
+      ylim: [0.0, 0.0]
+      zlim: [0.768, 0.768]
+      rotate_rand: false
+      relative_plane: Ground
+    category:
+      - name: migration_insert_hole_tube
+        index: [0]
+    select_mode:
+      nums: 1
+      mode: unique
+      label: [prism]
+Geometry:
+  -
+    common:
+      xlim: [0.60, 0.60]
+      ylim: [0.0, 0.0]
+      zlim: [0.765, 0.765]
+      rotate_rand: false
+      relative_plane: Ground
+    category:
+      - name: migration_insert_hole_slot
+        index: [0]
+    physics:
+      collision_approximation: none
+    select_mode:
+      nums: 1
+      mode: unique
+      label: [slot]
+  -
+    common:
+      xlim: [0.40, 0.40]
+      ylim: [0.0, 0.0]
+      zlim: [0.765, 0.765]
+      rotate_rand: false
+      relative_plane: Ground
+    category:
+      - name: migration_insert_hole_base
+        index: [0]
+    physics:
+      collision_approximation: none
+    select_mode:
+      nums: 1
+      mode: unique
+      label: [base]

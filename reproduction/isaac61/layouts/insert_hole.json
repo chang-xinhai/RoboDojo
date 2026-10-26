@@ -1,0 +1,239 @@
+{
+  "Rigid": {
+    "migration_insert_hole_tube": [
+      {
+        "category": "migration_insert_hole_tube",
+        "category_idx": 0,
+        "group": null,
+        "xlim": [
+          0.4,
+          0.4
+        ],
+        "ylim": [
+          0.0,
+          0.0
+        ],
+        "zlim": [
+          0.768,
+          0.768
+        ],
+        "qpos": [
+          1,
+          0,
+          0,
+          0
+        ],
+        "rotate_deg": 0,
+        "rotate_rand": false,
+        "relative_plane": "Ground",
+        "place_tag": null,
+        "margin": 0.005,
+        "check_mode": "bbox",
+        "need_check_stable": true,
+        "label": "prism",
+        "default_pos": [
+          0.4,
+          0.0,
+          0.768
+        ],
+        "default_ori": [
+          1,
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "physics": {
+          "mass": 0.05,
+          "friction": 0.45,
+          "type": "rigid"
+        },
+        "visual": {}
+      }
+    ]
+  },
+  "Geometry": {
+    "migration_insert_hole_slot": [
+      {
+        "category": "migration_insert_hole_slot",
+        "category_idx": 0,
+        "group": null,
+        "xlim": [
+          0.6,
+          0.6
+        ],
+        "ylim": [
+          0.0,
+          0.0
+        ],
+        "zlim": [
+          0.765,
+          0.765
+        ],
+        "qpos": [
+          1,
+          0,
+          0,
+          0
+        ],
+        "rotate_deg": 0,
+        "rotate_rand": false,
+        "relative_plane": "Ground",
+        "place_tag": null,
+        "margin": 0.005,
+        "check_mode": "bbox",
+        "need_check_stable": true,
+        "label": "slot",
+        "default_pos": [
+          0.6,
+          0.0,
+          0.765
+        ],
+        "default_ori": [
+          1,
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "physics": {
+          "mass": 0.0,
+          "friction": 0.0,
+          "type": "geometry",
+          "collision": true,
+          "collision_approximation": "none"
+        },
+        "visual": {}
+      }
+    ],
+    "migration_insert_hole_base": [
+      {
+        "category": "migration_insert_hole_base",
+        "category_idx": 0,
+        "group": null,
+        "xlim": [
+          0.4,
+          0.4
+        ],
+        "ylim": [
+          0.0,
+          0.0
+        ],
+        "zlim": [
+          0.765,
+          0.765
+        ],
+        "qpos": [
+          1,
+          0,
+          0,
+          0
+        ],
+        "rotate_deg": 0,
+        "rotate_rand": false,
+        "relative_plane": "Ground",
+        "place_tag": null,
+        "margin": 0.005,
+        "check_mode": "bbox",
+        "need_check_stable": true,
+        "label": "base",
+        "default_pos": [
+          0.4,
+          0.0,
+          0.765
+        ],
+        "default_ori": [
+          1,
+          0,
+          0,
+          0
+        ],
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "physics": {
+          "mass": 0.0,
+          "friction": 0.0,
+          "type": "geometry",
+          "collision": true,
+          "collision_approximation": "none"
+        },
+        "visual": {}
+      }
+    ]
+  },
+  "Room": {
+    "default": "Simple_Room_nolight",
+    "default_pos": [
+      0,
+      0,
+      0
+    ],
+    "default_rot": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "scale": [
+      0.5,
+      0.5,
+      0.5
+    ]
+  },
+  "Table": {
+    "default": "material_0122",
+    "scale": [
+      1.4,
+      1.1,
+      0.05
+    ],
+    "default_pos": [
+      0,
+      -0.05,
+      0.74
+    ],
+    "default_ori": [
+      1,
+      0,
+      0,
+      0
+    ]
+  },
+  "Ground": {
+    "geometry": "cube",
+    "thickness": 0.1,
+    "axis": "Z",
+    "default_pos": [
+      0,
+      0,
+      0
+    ],
+    "materials": {
+      "type": "mdl",
+      "default": "material_0564"
+    },
+    "physics_material": {
+      "static_friction": 1.0,
+      "dynamic_friction": 1.0,
+      "restitution": 0.0,
+      "friction_combine_mode": "multiply",
+      "restitution_combine_mode": "multiply"
+    }
+  },
+  "Background": {
+    "intensity": 1000,
+    "default": "brown_photostudio_02_4k.hdr"
+  },
+  "Light": {}
+}
