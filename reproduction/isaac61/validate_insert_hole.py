@@ -570,7 +570,13 @@ try:
     approach_attempts = []
     selected_object_target_q = np.asarray(official_target_q, dtype=float).copy()
     selected_insert_roll_rad = None
-    insert_rolls = np.linspace(0.0, 2.0 * np.pi, 8, endpoint=False)
+    roll_grid = list(np.linspace(0.0, 2.0 * np.pi, 8, endpoint=False))
+    forced_roll = os.environ.get("MIGRATION_INSERT_HOLE_INSERT_ROLL_RAD")
+    if forced_roll is None:
+        insert_rolls = roll_grid
+    else:
+        forced_roll = float(forced_roll)
+        insert_rolls = [forced_roll] + [r for r in roll_grid if abs(float(r) - forced_roll) > 1e-9]
     insert_start = np.asarray(env.robot_manager.get_joint(robot)[0], dtype=np.float32)
     for approach_distance in (0.16, 0.14, 0.12, 0.10, 0.08, 0.06, 0.04):
         # Stay on the inclined hole axis while approaching; a world-Z offset
@@ -680,20 +686,43 @@ try:
         rim_plan = None
         rim_distance = None
         rim_attempts = []
-        for distance in (0.020, 0.016, 0.012, 0.010):
-            rim_object_p = trajectory_hole_p + official_target_R @ np.asarray([0.0, 0.0, distance])
+        successful_approach = [
+            a for a in approach_attempts
+            if a.get("status") == "Success" and a.get("approach_axis_distance_m") is not None
+        ]
+        current_rim_distance = float(successful_approach[-1]["approach_axis_distance_m"])
+        # Walk from the successful approach pose to the rim in fresh 2 mm
+        # CuRobo plans.  A single long jump can be collision-free in planning
+        # yet scrape the physical rim during native execution.
+        rim_step_index = 0
+        while current_rim_distance > 0.020 + 1e-9:
+            next_distance = max(0.020, current_rim_distance - 0.002)
+            rim_object_p = trajectory_hole_p + official_target_R @ np.asarray([0.0, 0.0, next_distance])
             rim_target = target_link_for_object(rim_object_p, selected_object_target_q)
-            rim_probe = plan_link(np.asarray(env.robot_manager.get_joint(robot)[0], dtype=np.float32), rim_target)
-            rim_name = f"insert_rim_alignment_{int(round(distance * 1000)):03d}mm"
+            rim_probe = plan_link(
+                np.asarray(env.robot_manager.get_joint(robot)[0], dtype=np.float32),
+                rim_target,
+            )
+            rim_name = f"insert_rim_alignment_{int(round(next_distance * 1000)):03d}mm"
             record_plan(rim_name, rim_probe, rim_target)
-            rim_attempts.append({"distance_m": float(distance), "status": rim_probe.get("status")})
-            if rim_probe.get("status") == "Success":
-                rim_plan, rim_distance = rim_probe, float(distance)
-                break
+            rim_attempts.append({
+                "step": rim_step_index,
+                "from_distance_m": float(current_rim_distance),
+                "distance_m": float(next_distance),
+                "status": rim_probe.get("status"),
+            })
+            if rim_probe.get("status") != "Success":
+                raise RuntimeError(
+                    f"independent CuRobo incremental rim alignment failed at {next_distance:.3f} m"
+                )
+            execute(rim_probe, robot.gripper_scale[0], 2.0)
+            rim_plan = rim_probe
+            rim_distance = float(next_distance)
+            current_rim_distance = float(next_distance)
+            rim_step_index += 1
         result["insert_rim_alignment_attempts"] = rim_attempts
-        if rim_plan is None:
+        if rim_plan is None or rim_distance is None:
             raise RuntimeError("independent CuRobo rim alignment plan failed")
-        execute(rim_plan, robot.gripper_scale[0], 3.0)
         rim_object_pose = live_object_pose()
         result["after_rim_alignment_live_pose"] = {
             "object_pose_wxyz": np.r_[rim_object_pose[0], rim_object_pose[1]].tolist(),
