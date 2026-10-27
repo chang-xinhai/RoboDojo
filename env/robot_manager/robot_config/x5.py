@@ -1,3 +1,5 @@
+import os
+
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 import isaaclab.sim as sim_utils
@@ -9,7 +11,7 @@ from utils.isaaclab_compat import wxyz_to_xyzw
 def get_robot_config():
     return ArticulationCfg(
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{ROBOTS_PATH}/x5/ARX.usd",
+            usd_path=os.environ.get("ROBODOJO_X5_USD", f"{ROBOTS_PATH}/x5/ARX.usd"),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=True,
                 max_depenetration_velocity=5.0,

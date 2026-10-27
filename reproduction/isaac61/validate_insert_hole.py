@@ -7,6 +7,7 @@ import os
 import sys
 import traceback
 import hashlib
+import shutil
 from pathlib import Path
 import numpy as np
 
@@ -39,6 +40,44 @@ if os.environ.get("MIGRATION_CAPTURE_CONTACTS") == "1":
     except Exception:
         pass
 from pxr import Usd, UsdGeom, PhysxSchema
+
+def prepare_link7_link8_collision_variant():
+    """Create an isolated pre-cooked X5 asset with only finger collisions off."""
+    if os.environ.get("MIGRATION_INSERT_HOLE_FILTER_GRASP_COLLISIONS") != "1":
+        return None
+    from pxr import UsdPhysics
+    root = Path(os.environ["ROBODOJO_ASSET_ROOT"])
+    source = root / "Robots/x5/ARX.usd"
+    variant = root / "Robots/x5/ARX_insert_hole_link7link8_disabled.usd"
+    if not variant.exists():
+        shutil.copy2(source, variant)
+        stage = Usd.Stage.Open(str(variant))
+        changed = []
+        candidates = [
+            "/X5A/link7/collisions",
+            "/X5A/link8/collisions",
+            "/colliders/link7",
+            "/colliders/link8",
+        ]
+        candidates.extend(
+            str(prim.GetPath())
+            for prim in stage.TraverseAll()
+            if "/colliders/link7" in str(prim.GetPath())
+            or "/colliders/link8" in str(prim.GetPath())
+        )
+        for path in sorted(set(candidates)):
+            prim = stage.GetPrimAtPath(path)
+            if not prim or not prim.IsValid():
+                continue
+            UsdPhysics.CollisionAPI.Apply(prim).CreateCollisionEnabledAttr().Set(False)
+            changed.append(path)
+        if not changed:
+            raise RuntimeError("missing X5 link7/link8 collision prims in isolated variant")
+        stage.GetRootLayer().Save()
+    os.environ["ROBODOJO_X5_USD"] = str(variant)
+    return str(variant)
+
+_link_collision_variant = prepare_link7_link8_collision_variant()
 
 result = {
     "status": "FAIL",
@@ -477,6 +516,17 @@ try:
     def disable_gripper_finger_collisions():
         """Disable only link7/link8 collision shapes for insertion."""
         from pxr import UsdPhysics
+        if _link_collision_variant is not None:
+            result["grasp_collision_filter"] = {
+                "enabled": True,
+                "mode": "pre_spawn_link7_link8_collision_variant",
+                "asset": _link_collision_variant,
+                "disabled_paths": [
+                    "/X5A/link7/collisions",
+                    "/X5A/link8/collisions",
+                ],
+            }
+            return
         stage = env.scene_manager.stage
         finger_paths = []
         runtime_candidates = []
@@ -522,6 +572,23 @@ try:
                 })
                 if is_collision:
                     finger_paths.append(str(prim.GetPath()))
+        # Robot collision meshes are composed as instance-backed Xforms in
+        # Isaac Sim 6.1, so no child mesh is traversable here.  The authored
+        # collision container is still a valid PhysX collision prim and is the
+        # narrowest stable target for this task-specific filter.
+        for finger_name in ("link7", "link8"):
+            collision_path = f"/World/envs/env_0/robot{arm_index}/{finger_name}/collisions"
+            collision_prim = stage.GetPrimAtPath(collision_path)
+            if collision_prim and collision_prim.IsValid():
+                result["runtime_gripper_collision_candidates"].append({
+                    "path": collision_path,
+                    "type_name": str(collision_prim.GetTypeName()),
+                    "is_instance_proxy": bool(collision_prim.IsInstanceProxy()),
+                    "has_collision_api_before": bool(collision_prim.HasAPI(UsdPhysics.CollisionAPI)),
+                    "selected": True,
+                })
+                UsdPhysics.CollisionAPI.Apply(collision_prim).CreateCollisionEnabledAttr().Set(False)
+                finger_paths.append(collision_path)
         disabled_paths = []
         for path in finger_paths:
             prim = stage.GetPrimAtPath(path)
