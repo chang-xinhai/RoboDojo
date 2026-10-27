@@ -100,3 +100,42 @@ def test_actual_fluid_task_bottle_has_correct_surface_distance_sign():
     actual = wp.to_torch(view.get_sdf_and_gradients(wp.from_torch(torch.tensor(points))))
     assert actual[0, 0::2, 3].tolist() == pytest.approx([1e-5] * 3, abs=1e-8)
     assert actual[0, 1::2, 3].tolist() == pytest.approx([-1e-5] * 3, abs=1e-8)
+
+
+def test_original_precision_cup_quads_initialize_without_changing_asset():
+    asset = Path(__file__).resolve().parents[1] / "Assets/Object/RoboDojo/Rigid/cup/00006/object.usdz"
+    if not asset.is_file():
+        pytest.skip("RoboDojo precision cup asset is not installed")
+    stage = Usd.Stage.Open(str(asset))
+    prim = next(p for p in stage.Traverse() if p.IsA(UsdGeom.Mesh) and p.HasAPI(UsdPhysics.CollisionAPI))
+    mesh = UsdGeom.Mesh(prim)
+    original_points = np.asarray(mesh.GetPointsAttr().Get()).copy()
+    view = WarpTriangleMeshSdfView.from_usd(prim, "cpu")
+    assert view.triangle_count > 0
+    np.testing.assert_array_equal(view.points.numpy(), original_points)
+    np.testing.assert_array_equal(np.asarray(mesh.GetPointsAttr().Get()), original_points)
+
+
+def test_nonplanar_quad_retains_authored_vertices():
+    stage = Usd.Stage.CreateInMemory()
+    mesh = UsdGeom.Mesh.Define(stage, "/mesh")
+    points = [[0, 0, 0], [1, 0, 0], [1, 1, 0.2], [0, 1, 0]]
+    mesh.CreatePointsAttr(points)
+    mesh.CreateFaceVertexCountsAttr([4])
+    mesh.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+    view = WarpTriangleMeshSdfView.from_usd(mesh.GetPrim(), "cpu")
+    np.testing.assert_array_equal(view.points.numpy(), np.asarray(points, dtype=np.float32))
+    np.testing.assert_array_equal(view.indices.numpy().reshape(-1, 3), [[0, 1, 2], [0, 2, 3]])
+
+
+def test_concave_quad_uses_interior_diagonal_and_rejects_crossing_edges():
+    stage = Usd.Stage.CreateInMemory()
+    mesh = UsdGeom.Mesh.Define(stage, "/mesh")
+    mesh.CreatePointsAttr([[0, 0, 0], [1, 0.25, 0], [2, 0, 0], [1, 1, 0]])
+    mesh.CreateFaceVertexCountsAttr([4])
+    mesh.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+    view = WarpTriangleMeshSdfView.from_usd(mesh.GetPrim(), "cpu")
+    np.testing.assert_array_equal(view.indices.numpy().reshape(-1, 3), [[0, 1, 3], [1, 2, 3]])
+    mesh.GetPointsAttr().Set([[0, 0, 0], [1, 1, 0], [0, 1, 0], [1, 0, 0]])
+    with pytest.raises(ValueError, match="query quad"):
+        WarpTriangleMeshSdfView.from_usd(mesh.GetPrim(), "cpu")

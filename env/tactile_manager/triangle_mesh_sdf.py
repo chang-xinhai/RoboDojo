@@ -74,7 +74,7 @@ class WarpTriangleMeshSdfView:
         mesh = UsdGeom.Mesh(prim)
         counts = np.asarray(mesh.GetFaceVertexCountsAttr().Get(), dtype=np.int32)
         if not len(counts) or not np.isin(counts, (3, 4)).all():
-            raise ValueError(f"TacSL readback mesh requires triangles or planar convex quads: {prim.GetPath()}")
+            raise ValueError(f"TacSL readback mesh requires triangles or quads: {prim.GetPath()}")
         if mesh.GetHoleIndicesAttr().Get():
             raise ValueError(f"TacSL readback mesh holes require explicit collision triangles: {prim.GetPath()}")
         points = np.asarray(mesh.GetPointsAttr().Get(), dtype=np.float64)
@@ -85,13 +85,20 @@ class WarpTriangleMeshSdfView:
             offset += count
             if count == 4:
                 p = points[face]
-                normal = np.cross(p[1]-p[0], p[2]-p[0])
-                extent = np.linalg.norm(np.ptp(p, axis=0))
-                if (np.linalg.norm(normal) == 0 or extent == 0
-                        or abs(np.dot(p[3]-p[0], normal)) > 1e-6 * extent * np.linalg.norm(normal)
-                        or any(np.dot(np.cross(p[(i+1)%4]-p[i], p[(i+2)%4]-p[(i+1)%4]), normal) < 0
-                               for i in range(4))):
-                    raise ValueError(f"TacSL rejects nonplanar/nonconvex query quad: {prim.GetPath()}")
+                # USD quads need not be planar. Triangulate the authored points
+                # without flattening them or changing the physical collider.
+                # The area normal defines a projection in which a concave face
+                # must use its interior diagonal; crossing edges fail both.
+                normal = np.cross(p[1] - p[0], p[2] - p[0]) + np.cross(p[2] - p[0], p[3] - p[0])
+                for split in (((0, 1, 2), (0, 2, 3)), ((0, 1, 3), (1, 2, 3))):
+                    triangles = p[np.asarray(split)]
+                    normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+                    if np.any(normal != 0) and np.all(normals @ normal >= 0):
+                        faces.extend(face[np.asarray(split)])
+                        break
+                else:
+                    raise ValueError(f"TacSL rejects degenerate or self-intersecting query quad: {prim.GetPath()}")
+                continue
             faces.extend([face[[0, i, i+1]] for i in range(1, count-1)])
         faces = np.asarray(faces, dtype=np.int32)
         if mesh.GetOrientationAttr().Get() == "leftHanded":
