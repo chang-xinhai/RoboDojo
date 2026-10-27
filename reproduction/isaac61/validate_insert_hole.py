@@ -30,6 +30,14 @@ args = parser.parse_args()
 args.enable_cameras = False
 launcher = AppLauncher(args)
 app = launcher.app
+if os.environ.get("MIGRATION_CAPTURE_CONTACTS") == "1":
+    try:
+        from omni.kit.app import get_app
+        get_app().get_extension_manager().set_extension_enabled_immediate(
+            "isaacsim.sensors.experimental.physics", True
+        )
+    except Exception:
+        pass
 from pxr import Usd, UsdGeom, PhysxSchema
 
 result = {
@@ -44,6 +52,8 @@ result = {
     "plans": {},
 }
 env = None
+contact_records = []
+contact_capture_errors = []
 try:
     enable_legacy_isaacsim_extensions()
     import torch
@@ -79,6 +89,93 @@ try:
     _, task_cls = load_task_class("migration_insert_hole")
     env = task_cls(cfg, app, seed=0)
     reset_task_episode(env, profile)
+    contact_records = []
+    contact_capture_errors = []
+    contact_stage = {"label": None}
+    contact_sensors = []
+    contact_id_map = {}
+    if os.environ.get("MIGRATION_CAPTURE_CONTACTS") == "1":
+        try:
+            from pxr import PhysicsSchemaTools
+            for prim in env.scene_manager.stage.Traverse():
+                path = str(prim.GetPath())
+                if not path.startswith("/World/envs/env_0"):
+                    continue
+                try:
+                    body_id = int(PhysicsSchemaTools.sdfPathToInt(path))
+                    contact_id_map[str(body_id)] = path
+                except Exception as exc:
+                    contact_capture_errors.append(f"sdfPathToInt({path}): {exc!r}")
+            result["contact_id_map"] = contact_id_map
+            from isaacsim.sensors.experimental.physics import Contact, ContactSensor
+            tube_name = env.scene_manager.layout_manager.get_instance_name(0, label="prism")
+            tube_obj = env.scene_manager.layout_manager.get_scene_object(0, tube_name)
+            sensor_path = f"{tube_obj.prim.GetPath()}/contact_probe"
+            sensor = ContactSensor(
+                Contact.create(sensor_path, min_threshold=0.0, max_threshold=1.0e9, radius=-1.0)
+            )
+            sensor.add_raw_contact_data_to_frame()
+            contact_sensors.append(sensor)
+            result["contact_capture_enabled"] = True
+            result["contact_capture_backend"] = "isaacsim.experimental.physics.ContactSensor"
+        except Exception as exc:
+            result["contact_capture_enabled"] = False
+            contact_capture_errors.append(repr(exc))
+
+    def _contact_raw_get(raw, name, default=None):
+        if isinstance(raw, dict):
+            return raw.get(name, default)
+        return getattr(raw, name, default)
+
+    def _resolve_contact_body(value):
+        try:
+            body_id = int(value)
+        except Exception:
+            return None, None
+        mapped = contact_id_map.get(str(body_id))
+        try:
+            from pxr import PhysicsSchemaTools
+            native = str(PhysicsSchemaTools.intToSdfPath(body_id))
+        except Exception as exc:
+            contact_capture_errors.append(f"intToSdfPath({body_id}): {exc!r}")
+            native = None
+        return mapped or native, body_id
+
+    def capture_contacts(label):
+        target_stage = os.environ.get("MIGRATION_CONTACT_STAGE")
+        if label is None or (target_stage and label != target_stage):
+            return
+        for sensor_index, sensor in enumerate(contact_sensors):
+            try:
+                raw_contacts = sensor.get_raw_data()
+            except Exception as exc:
+                contact_capture_errors.append(repr(exc))
+                continue
+            for raw in raw_contacts:
+                if len(contact_records) >= 5000:
+                    return
+                body0, body0_id = _resolve_contact_body(_contact_raw_get(raw, "body0", 0))
+                body1, body1_id = _resolve_contact_body(_contact_raw_get(raw, "body1", 0))
+                def vec(name):
+                    value = _contact_raw_get(raw, name, {}) or {}
+                    if isinstance(value, dict):
+                        return [float(value.get(axis, 0.0)) for axis in ("x", "y", "z")]
+                    return [float(getattr(value, axis, 0.0)) for axis in ("x", "y", "z")]
+                contact_records.append({
+                    "stage": label,
+                    "sensor": sensor_index,
+                    "body0_id": body0_id,
+                    "body1_id": body1_id,
+                    "body0": body0,
+                    "body1": body1,
+                    "position": vec("position"),
+                    "normal": vec("normal"),
+                    "impulse": vec("impulse"),
+                    "time": float(_contact_raw_get(raw, "time", 0.0)),
+                    "dt": float(_contact_raw_get(raw, "dt", 0.0)),
+                })
+
+    result["contact_capture_errors"] = contact_capture_errors
     if os.environ.get("MIGRATION_DIAGNOSTIC_DISABLE_BASE_COLLISION") == "1":
         from pxr import UsdPhysics
         base_name = env.scene_manager.layout_manager.get_instance_name(0, label="base")
@@ -234,6 +331,7 @@ try:
             set_joint_target(arm, arm_target, joint_ids=robot.arm_joint_indices)
             set_joint_target(arm, grip_target, joint_ids=robot.gripper_joint_indices)
             env.sim_step(render=False)
+            capture_contacts(contact_stage["label"])
         target = np.asarray(final_row, dtype=np.float32).reshape(-1)
         stable = 0
         min_error = None
@@ -249,6 +347,7 @@ try:
             set_joint_target(arm, arm_target, joint_ids=robot.arm_joint_indices)
             set_joint_target(arm, grip_target, joint_ids=robot.gripper_joint_indices)
             env.sim_step(render=False)
+            capture_contacts(contact_stage["label"])
             current = np.asarray(env.robot_manager.get_joint(robot)[0], dtype=np.float32).reshape(-1)
             err = float(np.linalg.norm(current - target))
             min_error = err if min_error is None else min(min_error, err)
@@ -778,7 +877,11 @@ try:
                     if stage_plan.get("status") != "Success":
                         raise RuntimeError(f"independent CuRobo axis insertion joint stage {stage_idx} failed")
                 before_stage_p, before_stage_q = live_object_pose()
-                execute(stage_plan, robot.gripper_scale[0], 4.0, settle_steps=360)
+                contact_stage["label"] = f"stage_{stage_idx}"
+                try:
+                    execute(stage_plan, robot.gripper_scale[0], 4.0, settle_steps=360)
+                finally:
+                    contact_stage["label"] = None
                 after_stage_p, after_stage_q = live_object_pose()
                 actual_progress = float(np.dot(after_stage_p - before_stage_p, insert_dir))
                 metrics_stage = env.official_success_metrics(0)
@@ -853,9 +956,13 @@ try:
     result["target_object_pose_wxyz"] = np.r_[official_target_p, selected_object_target_q].tolist()
     result["status"] = "PASS" if result["official_success"] else "FAIL"
 except BaseException as exc:
+    result["contact_records"] = contact_records
+    result["contact_capture_errors"] = contact_capture_errors
     result["reason"] = f"{type(exc).__name__}: {exc}"
     result["traceback"] = traceback.format_exc()
 finally:
+    result["contact_records"] = contact_records
+    result["contact_capture_errors"] = contact_capture_errors
     if env is not None:
         try:
             env.close()
