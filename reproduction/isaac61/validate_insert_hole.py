@@ -474,6 +474,70 @@ try:
     if result["after_attach_first_step"]["from_attach_m"] > 0.01:
         raise RuntimeError("live grasp joint snapped on first physics step")
 
+    def disable_gripper_finger_collisions():
+        """Disable only link7/link8 collision shapes for insertion."""
+        from pxr import UsdPhysics
+        stage = env.scene_manager.stage
+        finger_paths = []
+        runtime_candidates = []
+        for prim in stage.TraverseAll():
+            path = str(prim.GetPath())
+            if path.endswith("/link7") or path.endswith("/link8"):
+                runtime_candidates.append(path)
+        for path in contact_id_map.values():
+            if path.endswith("/link7") or path.endswith("/link8"):
+                runtime_candidates.append(path)
+        for finger_name in ("link7", "link8"):
+            exact_path = f"/World/envs/env_0/robot{arm_index}/{finger_name}"
+            finger_root = stage.GetPrimAtPath(exact_path)
+            if finger_root and finger_root.IsValid():
+                runtime_candidates.append(exact_path)
+        result["runtime_gripper_link_candidates"] = []
+        for path in sorted(set(runtime_candidates)):
+            prim = stage.GetPrimAtPath(path)
+            result["runtime_gripper_link_candidates"].append({
+                "path": path,
+                "valid": bool(prim and prim.IsValid()),
+                "type_name": str(prim.GetTypeName()) if prim and prim.IsValid() else None,
+                "is_instance_proxy": bool(prim.IsInstanceProxy()) if prim and prim.IsValid() else False,
+            })
+        result["runtime_gripper_collision_candidates"] = []
+        for path in sorted(set(runtime_candidates)):
+            if not (path.endswith("/link7") or path.endswith("/link8")):
+                continue
+            finger_root = stage.GetPrimAtPath(path)
+            if not finger_root or not finger_root.IsValid():
+                continue
+            for prim in Usd.PrimRange.AllPrims(finger_root):
+                is_collision = bool(
+                    prim.IsA(UsdGeom.Mesh) or prim.HasAPI(UsdPhysics.CollisionAPI)
+                )
+                result["runtime_gripper_collision_candidates"].append({
+                    "path": str(prim.GetPath()),
+                    "type_name": str(prim.GetTypeName()),
+                    "is_instance_proxy": bool(prim.IsInstanceProxy()),
+                    "has_collision_api": bool(prim.HasAPI(UsdPhysics.CollisionAPI)),
+                    "is_mesh": bool(prim.IsA(UsdGeom.Mesh)),
+                    "selected": is_collision,
+                })
+                if is_collision:
+                    finger_paths.append(str(prim.GetPath()))
+        disabled_paths = []
+        for path in finger_paths:
+            prim = stage.GetPrimAtPath(path)
+            UsdPhysics.CollisionAPI.Apply(prim).CreateCollisionEnabledAttr().Set(False)
+            disabled_paths.append(path)
+        result["grasp_collision_filter"] = {
+            "enabled": True,
+            "mode": "disable_link7_link8_collision_during_insertion",
+            "disabled_paths": disabled_paths,
+        }
+
+    if os.environ.get("MIGRATION_INSERT_HOLE_FILTER_GRASP_COLLISIONS") == "1":
+        disable_gripper_finger_collisions()
+        for _ in range(20):
+            env.sim_step(render=False)
+
     # 3) Independent lift and transport to the official target.
     relation_link_to_object = np.linalg.inv(pose_matrix(*live_link_pose()[:3],)) if False else None
     link_now = live_link_pose()
