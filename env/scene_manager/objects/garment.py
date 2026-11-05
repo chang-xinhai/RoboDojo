@@ -131,6 +131,7 @@ class GarmentObject(SingleXFormPrim):
         self.triangle_indices = np.array(mesh.GetFaceVertexIndicesAttr().Get(), dtype=np.int32).reshape(-1, 3)
         if not len(self.initial_points_positions) or not len(self.triangle_indices):
             raise ValueError(f"Empty garment mesh at {self.mesh_prim_path}")
+        self._validate_mesh_frame(mesh)
         super().__init__(
             name=self.usd_prim_path,
             scale=self.init_scale,
@@ -138,9 +139,6 @@ class GarmentObject(SingleXFormPrim):
             position=self.init_pos,
             orientation=self.init_ori,
         )
-        # Keep the same layout frame as the former mesh-level wrapper: the asset's
-        # tiny authored child translation was previously replaced by set_world_pose.
-        UsdGeom.Xformable(mesh).ClearXformOpOrder()
         self._setup_surface_fem()
 
         # --- Visual Material and Visibility Setup ---
@@ -160,6 +158,38 @@ class GarmentObject(SingleXFormPrim):
 
         # Set initial pose
         self.set_world_pose(position=self.init_pos, orientation=self.init_ori)
+
+    def _validate_mesh_frame(self, mesh):
+        """Require static root-local rest points before replacing the root pose."""
+        root = self.stage.GetPrimAtPath(self.usd_prim_path)
+        if not root.IsA(UsdGeom.Xform):
+            raise ValueError(f"Surface FEM requires an Xform root at {self.usd_prim_path}")
+        prim = mesh.GetPrim()
+        below_root = True
+        while prim and not prim.IsPseudoRoot():
+            if prim == root:
+                below_root = False
+            xform = UsdGeom.Xformable(prim)
+            if xform:
+                if xform.GetResetXformStack() or xform.GetXformOpOrderAttr().GetNumTimeSamples() or any(
+                    op.GetAttr().GetNumTimeSamples() for op in xform.GetOrderedXformOps()
+                ):
+                    raise ValueError(f"Surface FEM does not support reset stacks or animated transforms at {prim.GetPath()}")
+                if not below_root:
+                    # The former mesh wrapper retained ancestor scale; the root
+                    # wrapper must not silently discard authored scale or shear.
+                    matrix = np.asarray(xform.GetLocalTransformation())
+                    linear = matrix[:3, :3]
+                    if not np.isfinite(matrix).all() or not (
+                        np.allclose(linear @ linear.T, np.eye(3), rtol=0, atol=1e-10)
+                        and np.isclose(np.linalg.det(linear), 1.0, rtol=0, atol=1e-10)
+                        and np.allclose(matrix[:, 3], [0, 0, 0, 1], rtol=0, atol=1e-10)
+                    ):
+                        raise ValueError(f"Surface FEM requires rigid authored root/ancestor transforms at {prim.GetPath()}")
+            prim = prim.GetParent()
+        relative, _ = UsdGeom.XformCache().ComputeRelativeTransform(mesh.GetPrim(), root)
+        if not np.allclose(np.asarray(relative), np.eye(4), rtol=0, atol=1e-10):
+            raise ValueError(f"Surface FEM requires an identity mesh-to-root transform at {self.mesh_prim_path}")
 
     def _apply_color_material(self, color):
         """Creates or updates the PreviewSurface material with the specified color."""

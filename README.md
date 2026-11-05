@@ -75,8 +75,11 @@ asset/layout metadata are accepted with a warning and ignored in full (including
 spring stiffness/damping, particle mass, adhesion, drag/lift and gravity scale).
 They are not converted into FEM parameters. Unknown `surface_fem` keys and the
 former `interaction_with_fluid` shared-particle mode raise an error. Garments
-require triangle meshes under Xform roots; the shipped Top_Long assets satisfy
-this. The former generated Plane primitive is not supported by this loader.
+require triangle meshes with a static identity transform relative to their
+Xform root. Reset stacks, animated transforms and authored root/ancestor scale,
+shear or reflection are rejected; configured layout pose and scale are retained.
+The shipped Top_Long assets satisfy these conditions. The former generated
+Plane primitive is not supported by this loader.
 Reset restores the simulation mesh and zeroes velocities. CPU readback uses
 official PhysX USD state publication (including after unrendered steps), because
 6.2's CPU tensor frontend does not implement deformable nodal access; CUDA
