@@ -44,7 +44,51 @@ This branch uses **Isaac Sim 6.2.0.0, Isaac Lab v3.0.0, Python 3.12,
 PyTorch 2.11 (CUDA 13.0), and Warp 1.17** with Isaac Sim's PhysX backend and
 legacy RTX (`RaytracedLighting`), retaining the original RoboDojo backend choices.
 Isaac Lab, cuRobo and XPolicyLab are fixed by the recorded submodule commits.
-Existing particle-cloth tasks are unavailable on this migration baseline.
+`fold_clothes` and `fold_clothes_random` use official PhysX **surface FEM**.
+This is a **new cloth physics baseline**, not numerically or behaviorally
+equivalent to the removed particle-cloth model; old scores are not comparable.
+Official surface cooking generates a simulation/collision mesh with
+simplification disabled, welding coincident seam vertices as required by PhysX.
+The original triangle mesh remains the visual skin. A checked rest-space map
+returns native nodes in the original vertex order for semantic reward IDs;
+textures, task actions, WXYZ layout poses and reward thresholds are retained.
+Rest points are the asset's original (already shaped) garment, not a flattened
+or remeshed sheet. Shared asset files are not modified.
+
+Garments use `physics.surface_fem` overrides. Defaults are Young's modulus
+1 MPa, Poisson ratio 0.3, density 300 kg/m³, thickness 1 mm, static/dynamic
+friction 0.5, elasticity/bend damping 0.05, self collision enabled, 32 position
+iterations, speculative CCD, and rest/contact offsets 1/3 mm. Membrane and bend
+stiffness are derived by PhysX from modulus, Poisson ratio and thickness.
+Total mass is explicitly the scaled rest-triangle area × density × thickness;
+it is **not** the former per-particle mass. These isotropic elastic material
+choices are a reproducible starting baseline, not a fit to a measured textile.
+
+Legacy `garment_config`, `particle_material` and `particle_system` blocks in
+asset/layout metadata are accepted with a warning and ignored in full (including
+spring stiffness/damping, particle mass, adhesion, drag/lift and gravity scale).
+They are not converted into FEM parameters. Unknown `surface_fem` keys and the
+former `interaction_with_fluid` shared-particle mode raise an error. Garments
+require triangle meshes under Xform roots; the shipped Top_Long assets satisfy
+this. The former generated Plane primitive is not supported by this loader.
+Reset restores the simulation mesh and zeroes velocities. CPU readback uses
+official PhysX USD state publication (including after unrendered steps), because
+6.2's CPU tensor frontend does not implement deformable nodal access; CUDA
+readback uses native nodal tensors. Both paths use the GPU surface FEM solver.
+See NVIDIA's
+[surface-deformable migration guide](https://docs.omniverse.nvidia.com/kit/docs/omni_physics/110.1/dev_guide/deformables/deformable_migration.html)
+and [deformable schema](https://docs.omniverse.nvidia.com/kit/docs/omni_physics/latest/dev_guide/deformables/omniphysics_deformable_schema.html).
+
+Native validation covered both preserved cloth tasks with two CPU-readback
+reset cycles each, plus two CUDA-readback reset cycles for `fold_clothes`,
+with all three camera views. Native reset checks confirmed zero node velocities
+and rest-space semantic mapping error below 0.000031 mm. After 80 ms of settling,
+rigid-fit deformation was 8.75–9.88 mm RMS across the two garments. A separate
+100-action scripted robot approach/descent/sweep/retreat produced apparent
+gripper–cloth interaction and local bunching in the videos; native measurements
+at action 75 showed 130.5 mm maximum displacement and 24.4 mm rigid-fit RMS
+deformation relative to the first action. This was a synthesized action sequence,
+not a demonstration replay; its score was zero and no successful fold was shown.
 
 Use a supported NVIDIA RTX GPU and Linux driver 580.65.06 or newer; see the
 [Isaac Sim requirements](https://docs.isaacsim.omniverse.nvidia.com/6.2.0/installation/requirements.html)

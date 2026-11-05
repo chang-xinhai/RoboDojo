@@ -318,12 +318,6 @@ class SceneManager:
         """
         # Get object type first to check if it should be disabled
         obj_type = inst_cfg.get("physics", {}).get("type", "rigid")
-        if obj_type == "garment":
-            raise NotImplementedError(
-                "Garment objects are unavailable in the Isaac Sim 6.2 non-cloth migration: "
-                "particle-based cloth was removed. Surface FEM cloth will be migrated separately. "
-                f"Cannot create '{prim_path}'."
-            )
         # Check if garment is disabled due to cpu+use_fabric combination
         # Do this BEFORE creating any primitive shapes to avoid creating orphaned primitives
         if self.device.type == "cpu" and self.use_fabric:
@@ -675,6 +669,8 @@ class SceneManager:
         Args:
             obj: Object instance to delete
         """
+        if isinstance(obj, GarmentObject):
+            obj.close()
         if self.device.type == "cuda":
             if isinstance(obj, GarmentObject):
                 if hasattr(obj, "usd_prim_path") and is_prim_path_valid(obj.usd_prim_path):

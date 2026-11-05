@@ -1,6 +1,7 @@
-from isaacsim.core.api.materials.particle_material import ParticleMaterial
+import warnings
+
 from isaacsim.core.api.materials.preview_surface import PreviewSurface
-from isaacsim.core.prims import SingleClothPrim, SingleParticleSystem
+from isaacsim.core.prims import SingleXFormPrim
 from isaacsim.core.simulation_manager import SimulationManager
 import isaacsim.core.utils.prims as prims_utils
 from isaacsim.core.utils.prims import get_prim_at_path, is_prim_path_valid
@@ -10,15 +11,18 @@ from isaacsim.core.utils.string import find_unique_string_name
 import numpy as np
 from omegaconf import DictConfig
 import omni.kit.commands
-from pxr import Usd, UsdGeom, UsdShade, Vt
+from omni.physx import get_physx_cooking_interface, get_physx_interface, get_physx_simulation_interface
+from omni.physx.scripts import deformableUtils, physicsUtils
+from pxr import PhysxSchema, Usd, UsdGeom, UsdShade, Vt
+from scipy.spatial import cKDTree
 import torch
 
 
-class GarmentObject(SingleClothPrim):
-    """
-    GarmentObject class that wraps the Isaac Sim SingleCloth prim functionality.
-    This class inherits from the Isaac Sim SingleClothPrim class and can be extended
-    to add custom garment-specific behaviors.
+class GarmentObject(SingleXFormPrim):
+    """Original garment mesh and task interface, simulated by PhysX surface FEM.
+
+    This is a new physical baseline, not a conversion of particle-cloth springs.
+    All physics opinions are authored on the current stage, never in asset files.
     """
 
     def __init__(
@@ -62,10 +66,35 @@ class GarmentObject(SingleClothPrim):
         self.visual_cfg = self.instance_config.get("visual", {})
         self.physics_cfg = self.instance_config.get("physics", {})
 
-        # Component-specific configurations
-        self.inst_garment_cfg = self.physics_cfg.get("garment_config", {})
-        self.inst_particle_material_cfg = self.physics_cfg.get("particle_material", {})
-        self.inst_particle_system_cfg = self.physics_cfg.get("particle_system", {})
+        self.surface_fem_config = {
+            "youngs_modulus": 1.0e6,
+            "poissons_ratio": 0.3,
+            "density": 300.0,
+            "surface_thickness": 0.001,
+            "friction": 0.5,
+            "elasticity_damping": 0.05,
+            "bend_damping": 0.05,
+            "self_collision": True,
+            "solver_position_iteration_count": 32,
+            "rest_offset": 0.001,
+            "contact_offset": 0.003,
+        }
+        overrides = self.physics_cfg.get("surface_fem", {})
+        unknown = set(overrides) - self.surface_fem_config.keys()
+        if unknown:
+            raise ValueError(f"Unknown surface_fem settings: {sorted(unknown)}")
+        self.surface_fem_config.update(overrides)
+        legacy = [key for key in ("garment_config", "particle_material", "particle_system") if key in self.physics_cfg]
+        if legacy:
+            warnings.warn(
+                f"{prim_path}: surface FEM uses a new physics baseline; ignoring legacy {', '.join(legacy)}. "
+                "Configure physics.surface_fem instead (see README).",
+                UserWarning,
+                stacklevel=2,
+            )
+        if self.instance_config.get("interaction_with_fluid", False):
+            raise ValueError("Surface FEM does not support the former shared particle-system fluid interaction.")
+        self._surface_view = None
 
         # USD path configurations
         self.usd_prim_path = prim_path
@@ -90,77 +119,32 @@ class GarmentObject(SingleClothPrim):
         else:
             self.mesh_prim_path = self.usd_prim_path
 
-        # Setup particle system
-        interaction_flag = self.instance_config.get("interaction_with_fluid", False)
-        if interaction_flag:
-            self.particle_system_path = f"/Particle_Attribute/{self.env_name}/particle_system"
-        else:
-            self.particle_system_path = f"/Particle_Attribute/{self.env_name}/garment_particle_system"
-
-        # Initialize or reuse particle system
-        if is_prim_path_valid(self.particle_system_path):
-            self.particle_system = SingleParticleSystem(prim_path=self.particle_system_path)
-        else:
-            self.particle_system = SingleParticleSystem(
-                prim_path=self.particle_system_path,
-                particle_system_enabled=self.inst_particle_system_cfg.get("particle_system_enabled", True),
-                enable_ccd=self.inst_particle_system_cfg.get("enable_ccd", True),
-                solver_position_iteration_count=self.inst_particle_system_cfg.get(
-                    "solver_position_iteration_count", 16
-                ),
-                max_depenetration_velocity=self.inst_particle_system_cfg.get("max_depenetration_velocity", None),
-                global_self_collision_enabled=self.inst_particle_system_cfg.get("global_self_collision_enabled", True),
-                non_particle_collision_enabled=self.inst_particle_system_cfg.get(
-                    "non_particle_collision_enabled", True
-                ),
-                contact_offset=self.inst_particle_system_cfg.get("contact_offset", 0.01),
-                rest_offset=self.inst_particle_system_cfg.get("rest_offset", 0.0075),
-                particle_contact_offset=self.inst_particle_system_cfg.get("particle_contact_offset", 0.01),
-                fluid_rest_offset=self.inst_particle_system_cfg.get("fluid_rest_offset", 0.0075),
-                solid_rest_offset=self.inst_particle_system_cfg.get("solid_rest_offset", 0.0075),
-                wind=self.inst_particle_system_cfg.get("wind", None),
-                max_neighborhood=self.inst_particle_system_cfg.get("max_neighborhood", None),
-                max_velocity=self.inst_particle_system_cfg.get("max_velocity", None),
-            )
-
-        # Setup particle material
-        self.particle_material_path = find_unique_string_name(
-            self.usd_prim_path + "/particle_material",
-            is_unique_fn=lambda x: not is_prim_path_valid(x),
-        )
-        self.particle_material = ParticleMaterial(
-            prim_path=self.particle_material_path,
-            adhesion=self.inst_particle_material_cfg.get("adhesion", 0.1),
-            adhesion_offset_scale=self.inst_particle_material_cfg.get("adhesion_offset_scale", 0.0),
-            cohesion=self.inst_particle_material_cfg.get("cohesion", 0.0),
-            particle_adhesion_scale=self.inst_particle_material_cfg.get("particle_adhesion_scale", 0.5),
-            particle_friction_scale=self.inst_particle_material_cfg.get("particle_friction_scale", 0.5),
-            drag=self.inst_particle_material_cfg.get("drag", 0.0),
-            lift=self.inst_particle_material_cfg.get("lift", 0.0),
-            friction=self.inst_particle_material_cfg.get("friction", 10.0),
-            damping=self.inst_particle_material_cfg.get("damping", 0.0),
-            gravity_scale=self.inst_particle_material_cfg.get("gravity_scale", 1.0),
-            viscosity=self.inst_particle_material_cfg.get("viscosity", None),
-            vorticity_confinement=self.inst_particle_material_cfg.get("vorticity_confinement", None),
-            surface_tension=self.inst_particle_material_cfg.get("surface_tension", None),
-        )
+        mesh = UsdGeom.Mesh.Get(self.stage, self.mesh_prim_path)
+        if (
+            not mesh
+            or self.mesh_prim_path == self.usd_prim_path
+            or any(count != 3 for count in mesh.GetFaceVertexCountsAttr().Get())
+        ):
+            raise ValueError(f"Surface FEM requires a triangle mesh below an Xform root at {self.mesh_prim_path}")
+        # Keep point ordering: rewards refer to semantic vertex IDs in the asset.
+        self.initial_points_positions = np.array(mesh.GetPointsAttr().Get(), dtype=np.float32)
+        self.triangle_indices = np.array(mesh.GetFaceVertexIndicesAttr().Get(), dtype=np.int32).reshape(-1, 3)
+        if not len(self.initial_points_positions) or not len(self.triangle_indices):
+            raise ValueError(f"Empty garment mesh at {self.mesh_prim_path}")
         super().__init__(
             name=self.usd_prim_path,
             scale=self.init_scale,
-            prim_path=self.mesh_prim_path,
-            particle_system=self.particle_system,
-            particle_material=self.particle_material,
-            particle_mass=float(self.inst_garment_cfg.get("particle_mass", 1e-2)),
-            self_collision=self.inst_garment_cfg.get("self_collision", True),
-            self_collision_filter=self.inst_garment_cfg.get("self_collision_filter", True),
-            stretch_stiffness=float(self.inst_garment_cfg.get("stretch_stiffness", 1e8)),
-            bend_stiffness=float(self.inst_garment_cfg.get("bend_stiffness", 1000.0)),
-            shear_stiffness=float(self.inst_garment_cfg.get("shear_stiffness", 1000.0)),
-            spring_damping=float(self.inst_garment_cfg.get("spring_damping", 10.0)),
+            prim_path=self.usd_prim_path,
+            position=self.init_pos,
+            orientation=self.init_ori,
         )
+        # Keep the same layout frame as the former mesh-level wrapper: the asset's
+        # tiny authored child translation was previously replaced by set_world_pose.
+        UsdGeom.Xformable(mesh).ClearXformOpOrder()
+        self._setup_surface_fem()
 
         # --- Visual Material and Visibility Setup ---
-        # Set visibility based on config. self.prim is available from SingleClothPrim.
+        # Set visibility based on config.
         visible = self.visual_cfg.get("visible", True)
         if not visible:
             imageable = UsdGeom.Imageable(self.prim)
@@ -222,71 +206,132 @@ class GarmentObject(SingleClothPrim):
 
         return None
 
+    def _setup_surface_fem(self):
+        cfg = self.surface_fem_config
+        self.simulation_mesh_path = f"{self.usd_prim_path}/simulation_mesh"
+        if not deformableUtils.create_auto_surface_deformable_hierarchy(
+            self.stage,
+            root_prim_path=self.usd_prim_path,
+            simulation_mesh_path=self.simulation_mesh_path,
+            cooking_src_mesh_path=self.mesh_prim_path,
+            cooking_src_simplification_enabled=False,
+            set_visibility_with_guide_purpose=True,
+        ):
+            raise RuntimeError(f"Failed to author surface FEM at {self.usd_prim_path}")
+        get_physx_cooking_interface().cook_auto_deformable_body(self.usd_prim_path)
+        simulation_mesh = UsdGeom.Mesh.Get(self.stage, self.simulation_mesh_path)
+        self.initial_simulation_points = np.array(simulation_mesh.GetPointsAttr().Get(), dtype=np.float32)
+        # Official cooking welds coincident seam vertices. Preserve every original
+        # semantic ID through an explicit rest-space map, never a nearest-node guess
+        # on a deformed or simplified mesh.
+        distances, self.vertex_to_simulation_node = cKDTree(self.initial_simulation_points).query(
+            self.initial_points_positions
+        )
+        if not np.all(distances <= 1.0e-7):
+            raise RuntimeError(f"Surface FEM cooking changed rest vertices at {self.mesh_prim_path}")
+        prim = self.prim
+        prim.ApplyAPI("PhysxSurfaceDeformableBodyAPI")
+        prim.GetAttribute("physxDeformableBody:selfCollision").Set(bool(cfg["self_collision"]))
+        prim.GetAttribute("physxDeformableBody:enableSpeculativeCCD").Set(True)
+        prim.GetAttribute("physxDeformableBody:solverPositionIterationCount").Set(
+            int(cfg["solver_position_iteration_count"])
+        )
+        collision = PhysxSchema.PhysxCollisionAPI.Apply(simulation_mesh.GetPrim())
+        collision.CreateRestOffsetAttr().Set(float(cfg["rest_offset"]))
+        collision.CreateContactOffsetAttr().Set(float(cfg["contact_offset"]))
+        self.physics_material_path = f"{self.usd_prim_path}/Looks/surface_fem_material"
+        if not deformableUtils.add_surface_deformable_material(
+            self.stage,
+            self.physics_material_path,
+            youngs_modulus=float(cfg["youngs_modulus"]),
+            poissons_ratio=float(cfg["poissons_ratio"]),
+            density=float(cfg["density"]),
+            surface_thickness=float(cfg["surface_thickness"]),
+            static_friction=float(cfg["friction"]),
+            dynamic_friction=float(cfg["friction"]),
+        ):
+            raise RuntimeError(f"Failed to author surface FEM material at {self.physics_material_path}")
+        material = self.stage.GetPrimAtPath(self.physics_material_path)
+        material.ApplyAPI("PhysxSurfaceDeformableMaterialAPI")
+        material.GetAttribute("physxDeformableMaterial:elasticityDamping").Set(float(cfg["elasticity_damping"]))
+        material.GetAttribute("physxDeformableMaterial:bendDamping").Set(float(cfg["bend_damping"]))
+        physicsUtils.add_physics_material_to_prim(self.stage, prim, self.physics_material_path)
+        # Explicit total mass from the scaled rest surface (not old per-particle mass).
+        points = self._points_to_world(self.initial_points_positions)
+        triangles = points[self.triangle_indices]
+        self.rest_surface_area = float(
+            0.5
+            * np.linalg.norm(
+                np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]), axis=1
+            ).sum()
+        )
+        self.total_mass = self.rest_surface_area * float(cfg["density"]) * float(cfg["surface_thickness"])
+        if not np.isfinite(self.total_mass) or self.total_mass <= 0:
+            raise ValueError(f"Invalid surface FEM mass for {self.mesh_prim_path}: {self.total_mass}")
+        prim.GetAttribute("omniphysics:mass").Set(self.total_mass)
+
+    def _points_to_world(self, points):
+        transform = np.array(UsdGeom.Xformable(self.prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default()))
+        return np.asarray(points) @ transform[:3, :3] + transform[3, :3]
+
     def initialize(self):
-        """
-        Initialize the object by capturing initial particle information
-        and setting up initial state.
-        """
-        self._get_initial_info()
+        """Bind the native surface FEM tensor view after scene creation."""
+        get_physx_simulation_interface().flush_changes()
+        self.physics_sim_view = SimulationManager.get_physics_sim_view()
+        if self.physics_sim_view is None:
+            raise RuntimeError("Surface FEM requires an initialized PhysX simulation view")
+        # PhysX 110.4's CPU tensor frontend does not implement deformable nodal
+        # access. CPU readback uses PhysX's USD publication, with the same GPU FEM
+        # solver; CUDA uses the native tensor view directly.
+        if self._device == "cpu":
+            return
+        self._surface_view = self.physics_sim_view.create_surface_deformable_body_view(self.usd_prim_path)
+        if self._surface_view.count != 1 or self._surface_view.max_simulation_nodes_per_body != len(
+            self.initial_simulation_points
+        ):
+            raise RuntimeError(f"Surface FEM mesh identity mismatch at {self.mesh_prim_path}")
 
     def reset(self):
-        """
-        Perform reset by restoring initial particle positions and setting new pose using LayoutManager.
-
-        Args:
-            soft: If True, use alternate reset ranges; otherwise use initial ranges
-        """
-        # Reset particle positions first
+        """Restore the undeformed mesh at the current pose and zero native velocities."""
         if self._device == "cpu":
-            self._prim.GetAttribute("points").Set(Vt.Vec3fArray.FromNumpy(self.initial_points_positions))
-        else:
-            if hasattr(self, "_cloth_prim_view") and self._cloth_prim_view:
-                if isinstance(self.initial_points_positions, np.ndarray):
-                    initial_pos_tensor = torch.from_numpy(self.initial_points_positions).to(self._device)
-                    if initial_pos_tensor.ndim == 2:
-                        initial_pos_tensor = initial_pos_tensor.unsqueeze(0)
-                else:
-                    initial_pos_tensor = self.initial_points_positions.to(self._device)
-
-                expected_shape_prefix = self._cloth_prim_view.get_world_positions().shape[:-1]
-                if initial_pos_tensor.shape[:-1] != expected_shape_prefix:
-                    if len(expected_shape_prefix) == 2 and initial_pos_tensor.ndim == 2:
-                        initial_pos_tensor = initial_pos_tensor.unsqueeze(0)
-                try:
-                    self._cloth_prim_view.set_world_positions(initial_pos_tensor)
-                except Exception as e:
-                    print(f"Error setting world positions in reset for {self._prim_path}: {e}")
+            mesh = UsdGeom.Mesh.Get(self.stage, self.simulation_mesh_path)
+            mesh.GetPointsAttr().Set(Vt.Vec3fArray.FromNumpy(self.initial_simulation_points))
+            mesh.CreateVelocitiesAttr().Set(Vt.Vec3fArray.FromNumpy(np.zeros_like(self.initial_simulation_points)))
+            get_physx_simulation_interface().flush_changes()
+            return
+        positions = self._backend_utils.convert(
+            self._points_to_world(self.initial_simulation_points)[None].astype(np.float32), self._device
+        )
+        indices = self._backend_utils.create_tensor_from_list([0], dtype="int32", device=self._device)
+        self._surface_view.set_simulation_nodal_positions(positions, indices)
+        self._surface_view.set_simulation_nodal_velocities(positions * 0, indices)
 
     def apply_saved_pose(self):
+        self.set_world_pose(np.asarray(self.init_pos, dtype=np.float32) + self.env_origin, self.init_ori)
+        self.set_local_scale(self.init_scale)
         self.reset()
-        position = self.init_pos
-        orientation = self.init_ori
-        scale = self.init_scale
-
-        position = np.array(position, dtype=np.float32) + self.env_origin
-        self.set_world_pose(position, orientation)
-        if hasattr(self, "set_local_scale"):
-            self.set_local_scale(scale)
 
     def sample_mesh_vertices(self):
-        """Return mesh points in world and local space."""
+        """Return current native FEM vertices in original asset order and the layout frame."""
         if self._device == "cpu":
-            pos_world, ori_world = self.get_world_pose()
-            scale_world = self.get_world_scale()
-            mesh_points = self._get_points_pose().detach().cpu().numpy()
-            transformed_mesh_points = self.transform_points(
-                mesh_points,
-                pos_world.detach().cpu().numpy(),
-                ori_world.detach().cpu().numpy(),
-                scale_world.detach().cpu().numpy(),
-            )
+            # Publish native state even after unrendered steps. Never sample the
+            # static cooking source or depend on camera rendering for rewards.
+            get_physx_interface().update_transformations(False, True, True, True)
+            mesh = UsdGeom.Mesh.Get(self.stage, self.simulation_mesh_path)
+            local_nodes = np.asarray(mesh.GetPointsAttr().Get(), dtype=np.float32)
+            world_points = self._points_to_world(local_nodes[self.vertex_to_simulation_node])
         else:
-            mesh_points = self._cloth_prim_view.get_world_positions().squeeze(0).detach().cpu().numpy()
-            transformed_mesh_points = mesh_points
-            pos_world = None
-            ori_world = None
+            positions = self._surface_view.get_simulation_nodal_positions()
+            world_points = positions[0].detach().cpu().numpy()[self.vertex_to_simulation_node].copy()
+        transform = np.array(UsdGeom.Xformable(self.prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default()))
+        local_points = (world_points - transform[3, :3]) @ np.linalg.inv(transform[:3, :3])
+        pos_world, ori_world = self.get_world_pose()
+        return world_points, local_points, pos_world, ori_world
 
-        return transformed_mesh_points, mesh_points, pos_world, ori_world
+    def close(self):
+        """Release only this body's view; the scene owns the simulation view."""
+        self._surface_view = None
+        self.physics_sim_view = None
 
     def _apply_visual_material(self, material_path: str):
         """Apply a visual material to the garment mesh."""
@@ -347,15 +392,6 @@ class GarmentObject(SingleClothPrim):
             pass
         return None
 
-    def _get_initial_info(self):
-        """Capture initial particle positions for reset functionality."""
-        if self._device == "cpu":
-            self.initial_points_positions = self._get_points_pose().detach().cpu().numpy()
-        else:
-            self.physics_sim_view = SimulationManager.get_physics_sim_view()
-            self._cloth_prim_view.initialize(self.physics_sim_view)
-            self.initial_points_positions = self._cloth_prim_view.get_world_positions()
-
     def transform_points(self, points, pos, ori, scale):
         """
         Transform local points to world space using position, orientation, and scale.
@@ -375,74 +411,10 @@ class GarmentObject(SingleClothPrim):
         return transformed_points
 
     def get_state(self, is_relative: bool = False) -> dict[str, torch.Tensor]:
-        """Return root pose [pos(3), quat(4)] for layout/reward queries."""
-        try:
-            pos_world, ori_world = self.get_world_pose()
-
-            # Convert to tensors
-            if isinstance(pos_world, np.ndarray):
-                pos_tensor = torch.tensor(pos_world, dtype=torch.float32)
-            elif isinstance(pos_world, torch.Tensor):
-                pos_tensor = pos_world.clone().detach().to(dtype=torch.float32)
-            else:
-                pos_tensor = torch.tensor(pos_world, dtype=torch.float32)
-
-            if isinstance(ori_world, np.ndarray):
-                ori_tensor = torch.tensor(ori_world, dtype=torch.float32)
-            elif isinstance(ori_world, torch.Tensor):
-                ori_tensor = ori_world.clone().detach().to(dtype=torch.float32)
-            else:
-                ori_tensor = torch.tensor(ori_world, dtype=torch.float32)
-
-            # Ensure correct shapes
-            if pos_tensor.ndim == 0:
-                pos_tensor = pos_tensor.unsqueeze(0)
-            if pos_tensor.shape[0] < 3:
-                pos_tensor = torch.cat(
-                    [
-                        pos_tensor,
-                        torch.zeros(3 - pos_tensor.shape[0], dtype=torch.float32),
-                    ]
-                )
-            pos_tensor = pos_tensor[:3]  # Take only first 3 elements
-
-            if ori_tensor.ndim == 0:
-                ori_tensor = ori_tensor.unsqueeze(0)
-            if ori_tensor.shape[0] < 4:
-                ori_tensor = torch.cat(
-                    [
-                        ori_tensor,
-                        torch.zeros(4 - ori_tensor.shape[0], dtype=torch.float32),
-                    ]
-                )
-            ori_tensor = ori_tensor[:4]  # Take only first 4 elements
-
-            # Combine position and orientation into root_pose [pos(3), quat(4)]
-            root_pose = torch.cat([pos_tensor, ori_tensor])
-
-            # Apply relative transformation if needed
-            if is_relative and hasattr(self, "env_origin"):
-                env_origin_tensor = (
-                    torch.tensor(self.env_origin, dtype=torch.float32, device=root_pose.device)
-                    if isinstance(self.env_origin, np.ndarray)
-                    else self.env_origin
-                )
-                if env_origin_tensor.dim() == 0:
-                    env_origin_tensor = env_origin_tensor.unsqueeze(0)
-                if env_origin_tensor.shape[0] < 3:
-                    env_origin_tensor = torch.cat(
-                        [
-                            env_origin_tensor,
-                            torch.zeros(
-                                3 - env_origin_tensor.shape[0],
-                                device=env_origin_tensor.device,
-                                dtype=torch.float32,
-                            ),
-                        ]
-                    )
-                root_pose[:3] -= env_origin_tensor[:3]
-        except (AttributeError, RuntimeError, Exception):
-            # If get_world_pose fails, return zeros
-            root_pose = torch.zeros(7, dtype=torch.float32)
-
-        return {"root_pose": root_pose}
+        """Return the layout frame [position, WXYZ]; deformation is in the vertices."""
+        position, orientation = self.get_world_pose()
+        position = torch.as_tensor(position, dtype=torch.float32).clone()
+        orientation = torch.as_tensor(orientation, dtype=torch.float32).clone()
+        if is_relative:
+            position -= torch.as_tensor(self.env_origin, dtype=torch.float32, device=position.device)
+        return {"root_pose": torch.cat((position, orientation))}
