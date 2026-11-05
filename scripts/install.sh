@@ -121,11 +121,11 @@ setup_base_deps() {
 setup_submodules() {
   cd "$CURRENT_DIR" || exit 1
   local subs=(third_party/IsaacLab third_party/curobo XPolicyLab)
-  info "[3/7] Syncing and updating submodules from remote..."
+  info "[3/7] Syncing and installing pinned submodules..."
   git submodule sync "${subs[@]}"
   for sub in "${subs[@]}"; do
-    info "    Updating ${sub} from remote..."
-    git submodule update --init --remote --progress "$sub" || {
+    info "    Checking out the recorded commit for ${sub}..."
+    git submodule update --init --progress "$sub" || {
       [ "$sub" = "XPolicyLab" ] && error "Failed to clone XPolicyLab. Ensure HTTPS auth (e.g. gh auth login)."
       error "Failed to update $sub."
     }

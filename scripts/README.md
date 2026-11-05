@@ -9,6 +9,9 @@
 | [init_assets.sh](init_assets.sh) | Download robot/object assets |
 | [eval_policy.sh](eval_policy.sh) | Isaac Sim eval client (called by `robodojo.sh client` and XPolicyLab) |
 
+The installer checks out the submodule commits recorded by RoboDojo, including
+XPolicyLab. It does not advance dependencies to their latest remote branches.
+
 ## Typical eval flow
 
 ```text
