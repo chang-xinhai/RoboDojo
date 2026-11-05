@@ -2,8 +2,9 @@ from collections.abc import Sequence
 
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim import PhysxCfg, SimulationCfg
+from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
+from isaaclab_physx.physics import PhysxCfg
 
 from env.environment.isaac.direct_rl_env import CustomDirectRLEnv
 
@@ -23,7 +24,7 @@ class IsaacRLEnvCfg(DirectRLEnvCfg):
     sim: SimulationCfg = SimulationCfg(
         device="cuda:0",
         gravity=(0.0, 0.0, -9.81),
-        physx=PhysxCfg(),
+        physics=PhysxCfg(),
     )
 
 
@@ -37,7 +38,7 @@ class IsaacRLEnv(CustomDirectRLEnv):
 
     def _setup_scene(self):
         self.func["_setup_scene"](self)
-        self.scene.clone_environments(copy_from_source=True)
+        # Isaac Lab 3 constructs and clones the configured robot scene before this hook.
         self.func["_post_setup_scene"](self)
 
     def _get_observations(self):

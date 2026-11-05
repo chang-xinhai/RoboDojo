@@ -38,6 +38,54 @@ https://private-user-images.githubusercontent.com/88101805/619409345-cc074c5d-45
 
 ## 📚 Documentation
 
+### Isaac Sim 6.2 migration branch
+
+This branch uses **Isaac Sim 6.2.0.0, Isaac Lab v3.0.0, Python 3.12,
+PyTorch 2.11 (CUDA 13.0), and Warp 1.17** with Isaac Sim's PhysX backend and
+legacy RTX (`RaytracedLighting`), retaining the original RoboDojo backend choices.
+Isaac Lab, cuRobo and XPolicyLab are fixed by the recorded submodule commits.
+Existing particle-cloth tasks are unavailable on this migration baseline.
+
+Use a supported NVIDIA RTX GPU and Linux driver 580.65.06 or newer; see the
+[Isaac Sim requirements](https://docs.isaacsim.omniverse.nvidia.com/6.2.0/installation/requirements.html)
+for GPU, memory and renderer requirements. The native installation uses conda:
+
+```bash
+bash scripts/install.sh --install
+conda activate RoboDojo
+bash scripts/init_assets.sh
+bash scripts/robodojo.sh doctor --skip-policy
+```
+
+The installer creates a **fresh Python 3.12** `RoboDojo` environment. If that name
+already contains Python 3.11, preserve or remove it after checking its consumers;
+the installer will not upgrade it in place. Isaac Lab dependencies follow its
+lock and official overrides, with NumPy 2.3.1 retained for Numba and Pinocchio
+compatibility. cuRobo uses CUDA 13 runtime compilation,
+so a separate CUDA 13 toolkit is not required. Policy servers retain their own
+environments. `doctor` checks packages and paths without launching the simulator;
+an actual evaluation is still required to verify GPU rendering and planning.
+
+The existing Docker recipe targets the upstream 5.1 stack and is **not validated
+for this branch**. Use the native installer above.
+
+Validation uses the installed native environment, an RTX 5090, and headless
+ARX X5 evaluation. Seven Precision tasks passed short reset/action checks;
+articulation, particle-fluid and conveyor scenes were also exercised. A frozen
+308-action `insert_tubes` replay retained score 100 and all reward decisions,
+with maximum end-effector position difference of 0.268 mm and three-view videos.
+The 320-command dataset replay completed, but did not succeed; without the full
+demonstration object checkpoint it verifies robot commands, not contact replay.
+
+With unchanged VPP2 weights/settings, seed 1 and layout 0, `insert_tubes`
+succeeded in 307 actions (old-runtime control: 308); `pour_balls_into_vase`
+succeeded and `plug_in_charger` reached its 400-action limit without success.
+This is a representative sample, not a full-suite equivalence result. Rendering
+appearance differences remain. `fill_egg_holder` layout 0 failed the original
+reset stability check (30.046° rotation against a 30° limit); its thresholds
+were retained. Interactive GUI evaluation remains unvalidated: the window
+opened, but the bounded startup test ended during initial shader compilation.
+
 The [RoboDojo documentation](https://robodojo-benchmark.com/doc/) is the canonical reference. Key sections:
 
 | Section | Description |
@@ -120,8 +168,8 @@ Released under the [MIT License](LICENSE).
 
 
 <p align="center">
-  <img alt="Python 3.11" src="https://img.shields.io/badge/Python-3.11-475569?style=flat-square&logo=python&logoColor=white&labelColor=64748b" height="22"/>&nbsp;
-  <img alt="Isaac Sim 5.1" src="https://img.shields.io/badge/Isaac_Sim-5.1-475569?style=flat-square&logo=nvidia&logoColor=76B900&labelColor=64748b" height="22"/>&nbsp;
-  <img alt="Isaac Lab 2.3" src="https://img.shields.io/badge/Isaac_Lab-2.3-475569?style=flat-square&logo=nvidia&logoColor=76B900&labelColor=64748b" height="22"/>&nbsp;
+  <img alt="Python 3.12" src="https://img.shields.io/badge/Python-3.12-475569?style=flat-square&logo=python&logoColor=white&labelColor=64748b" height="22"/>&nbsp;
+  <img alt="Isaac Sim 6.2" src="https://img.shields.io/badge/Isaac_Sim-6.2-475569?style=flat-square&logo=nvidia&logoColor=76B900&labelColor=64748b" height="22"/>&nbsp;
+  <img alt="Isaac Lab 3.0" src="https://img.shields.io/badge/Isaac_Lab-3.0-475569?style=flat-square&logo=nvidia&logoColor=76B900&labelColor=64748b" height="22"/>&nbsp;
   <img alt="License MIT" src="https://img.shields.io/badge/License-MIT-475569?style=flat-square&labelColor=64748b" height="22"/>
 </p>

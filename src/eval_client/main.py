@@ -1,6 +1,7 @@
 import argparse
 from datetime import datetime
 import importlib
+import importlib.util
 import json
 import os
 import sys
@@ -59,9 +60,18 @@ parser.add_argument(
 
 
 parser.add_argument("--seed", type=int, required=True, help="policy seed for eval")
+# Lab 3 no longer adds these flags, but existing RoboDojo launch commands use them.
+parser.add_argument("--headless", action="store_true", help="Run without a Kit window.")
+parser.add_argument("--enable_cameras", action="store_true", help="Enable Isaac Sim RTX camera rendering.")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+# Keep the Kit window while RoboDojo owns USD/render synchronization.
+if args_cli.visualizer == ["kit"] or (
+    args_cli.visualizer is None and not args_cli.headless and os.environ.get("HEADLESS", "0") != "1"
+):
+    args_cli.visualizer = None
+    args_cli.visualizer_intent = {"has_kit_visualizer": True}
 
 # Safe to import before AppLauncher: env is a namespace package (no __init__)
 # and GLOBAL_CONFIGS only imports os, so this pulls in no app-dependent code.
@@ -125,8 +135,42 @@ from env.camera_manager.capture.render_sync import add_zero_delay_kit_args
 
 add_zero_delay_kit_args(args_cli)
 
+
+def _launch_app_with_legacy_extensions(args):
+    """Expose Sim 6.2's bundled Core camera APIs to the Lab experience."""
+    # Resolve the active package, including binary installs' python_packages
+    # layout, without relying on an inherited shell's ISAAC_PATH.
+    sim_spec = importlib.util.find_spec("isaacsim")
+    if sim_spec is None or sim_spec.origin is None:
+        raise RuntimeError("Isaac Sim 6.2 is not installed in the active Python environment.")
+    sim_root = os.path.dirname(os.path.realpath(sim_spec.origin))
+    if os.path.basename(os.path.dirname(sim_root)) == "python_packages":
+        sim_root = os.path.dirname(os.path.dirname(sim_root))
+    deprecated_exts = os.path.join(sim_root, "extsDeprecated")
+    if not os.path.isdir(deprecated_exts):
+        raise RuntimeError(f"Isaac Sim 6.2 deprecated extension directory is missing: {deprecated_exts}")
+
+    # Lab splits kit_args on whitespace. Separate argv entries preserve spaces
+    # in installation paths; restore the command for os.execv self-restarts.
+    original_argv = sys.argv
+    sys.argv = [
+        *original_argv,
+        "--ext-folder",
+        deprecated_exts,
+        "--enable",
+        "isaacsim.sensors.camera",
+        "--enable",
+        "isaacsim.asset.gen.conveyor",
+        "--/persistent/rtx/modes/rt/enabled=true",
+    ]
+    try:
+        return AppLauncher(args)
+    finally:
+        sys.argv = original_argv
+
+
 # launch omniverse app
-app_launcher = AppLauncher(args_cli)
+app_launcher = _launch_app_with_legacy_extensions(args_cli)
 simulation_app = app_launcher.app
 
 from omegaconf import OmegaConf

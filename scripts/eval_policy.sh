@@ -121,7 +121,6 @@ echo "[INFO] num_envs        = ${num_envs}"
 extra_args=()
 
 KIT_ENABLE_EXTS=(
-  "isaacsim.replicator.behavior"
   "isaacsim.sensors.camera"
 )
 

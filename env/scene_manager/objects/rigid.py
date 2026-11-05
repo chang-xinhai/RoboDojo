@@ -9,10 +9,38 @@ from isaacsim.core.utils.string import find_unique_string_name
 import numpy as np
 from omegaconf import DictConfig
 import omni.usd
-from pxr import Gf, Sdf, Usd, UsdGeom
+from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics
 import torch
 
 from env.scene_manager.layout_manager import LayoutManager
+
+
+def _normalize_rigid_body_hierarchy(root):
+    """Compose a Rigid-class asset as the single body controlled by this wrapper.
+
+    Only stage API overrides change; source assets and collider properties stay
+    intact. This corrects invalid nested bodies, not their old simulation state.
+    """
+    prims = list(Usd.PrimRange(root))
+    if not any(prim != root and prim.HasAPI(UsdPhysics.RigidBodyAPI) for prim in prims):
+        return
+
+    # Validate the whole asset before writing any overrides.
+    for prim in prims:
+        if prim.IsA(UsdPhysics.Joint):
+            raise RuntimeError(
+                f"RigidObject cannot merge an asset with joints: {prim.GetPath()}. Use the articulation object type."
+            )
+        if prim != root and prim.IsA(UsdGeom.Xformable) and UsdGeom.Xformable(prim).GetResetXformStack():
+            raise RuntimeError(f"RigidObject cannot merge an independent transform subtree: {prim.GetPath()}")
+
+    for prim in prims:
+        schemas = [UsdPhysics.ArticulationRootAPI, PhysxSchema.PhysxArticulationAPI]
+        if prim != root:
+            schemas += [UsdPhysics.RigidBodyAPI, PhysxSchema.PhysxRigidBodyAPI]
+        for schema in schemas:
+            if prim.HasAPI(schema) and not prim.RemoveAPI(schema):
+                raise RuntimeError(f"Failed to remove {schema.__name__} from {prim.GetPath()}")
 
 
 class RigidObject(SingleRigidPrim, SingleGeometryPrim):
@@ -41,6 +69,8 @@ class RigidObject(SingleRigidPrim, SingleGeometryPrim):
                 else f"Failed to find an existing prim at path {prim_path}"
             )
             raise RuntimeError(error_message)
+
+        _normalize_rigid_body_hierarchy(prim)
 
         """Initialize a rigid body object with geometry and physics properties."""
         self.stage = prim.GetStage()

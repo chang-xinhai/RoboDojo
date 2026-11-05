@@ -4,7 +4,6 @@ import carb
 from isaacsim.core.utils.prims import delete_prim, is_prim_path_valid
 from isaacsim.core.utils.stage import add_reference_to_stage, get_current_stage
 from isaacsim.core.utils.string import find_unique_string_name
-from isaacsim.replicator.behavior.utils.scene_utils import create_mdl_material
 import numpy as np
 from omegaconf import DictConfig, ListConfig
 import omni.kit.commands
@@ -12,6 +11,8 @@ from omni.physx.scripts import particleUtils, physicsUtils
 from pxr import Gf, PhysxSchema, Sdf, UsdGeom, Vt
 from scipy.spatial import Delaunay
 import torch
+
+from utils.usd_schema import create_mdl_material
 
 
 class FluidObject:
@@ -50,6 +51,13 @@ class FluidObject:
         self.instance_config = inst_config
 
         self.physics_cfg = self.instance_config.get("physics", {})
+        for parameter in ("drag", "lift"):
+            value = self.physics_cfg.get("particle_material", {}).get(parameter)
+            if value not in (None, 0.0):
+                raise NotImplementedError(
+                    f"Fluid particle_material.{parameter}={value!r} is unsupported in Isaac Sim 6.2: "
+                    "PhysX removed the particle drag and lift parameters."
+                )
 
         self.env_origin = env_origin.detach().cpu().numpy()
 
@@ -209,8 +217,6 @@ class FluidObject:
             cohesion=inst_particle_material_cfg.get("cohesion"),
             particle_adhesion_scale=inst_particle_material_cfg.get("particle_adhesion_scale"),
             particle_friction_scale=inst_particle_material_cfg.get("particle_friction_scale"),
-            drag=inst_particle_material_cfg.get("drag"),
-            lift=inst_particle_material_cfg.get("lift"),
             friction=inst_particle_material_cfg.get("friction"),
             damping=inst_particle_material_cfg.get("damping"),
             gravity_scale=inst_particle_material_cfg.get("gravity_scale", 1.0),

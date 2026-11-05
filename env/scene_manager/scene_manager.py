@@ -92,6 +92,7 @@ class SceneManager:
         self.pending_initialization = []
         self.spawnable_object_types = [
             "rigid",
+            "dynamic",
             "articulation",
             "garment",
             "geometry",
@@ -122,12 +123,13 @@ class SceneManager:
         for env_idx in range(self.num_envs):
             self._set_env_seed(env_idx)
             if self.device.type == "cuda":
-                # Create dynamic and articulation objects for CUDA
+                # Preserve rigid, dynamic, and articulation prims across CUDA reloads.
                 self.spawn_scene_objects(
                     env_id=env_idx,
-                    exclude_types=list(set(self.spawnable_object_types) - {"rigid", "articulation"}),
+                    exclude_types=list(set(self.spawnable_object_types) - {"rigid", "dynamic", "articulation"}),
                 )
             else:
+                # Defer CPU rigid/dynamic creation to avoid deleting live shapes on first reload.
                 self.spawn_scene_objects(
                     env_id=env_idx,
                     exclude_types=list(set(self.spawnable_object_types) - {"articulation"}),
@@ -238,8 +240,8 @@ class SceneManager:
         if self.device.type == "cuda":
             self.relocate_stale_objects(env_id, ["rigid", "articulation"])
             # Clear existing objects (based on exclude_types)
-            self.clear_scene_objects(env_id, exclude_types=["rigid", "articulation"])
-            self.spawn_scene_objects(env_id, exclude_types=["rigid", "articulation"])
+            self.clear_scene_objects(env_id, exclude_types=["rigid", "dynamic", "articulation"])
+            self.spawn_scene_objects(env_id, exclude_types=["rigid", "dynamic", "articulation"])
         else:
             self.relocate_stale_objects(env_id, ["articulation"])
             # Clear existing objects (based on exclude_types)
@@ -316,6 +318,12 @@ class SceneManager:
         """
         # Get object type first to check if it should be disabled
         obj_type = inst_cfg.get("physics", {}).get("type", "rigid")
+        if obj_type == "garment":
+            raise NotImplementedError(
+                "Garment objects are unavailable in the Isaac Sim 6.2 non-cloth migration: "
+                "particle-based cloth was removed. Surface FEM cloth will be migrated separately. "
+                f"Cannot create '{prim_path}'."
+            )
         # Check if garment is disabled due to cpu+use_fabric combination
         # Do this BEFORE creating any primitive shapes to avoid creating orphaned primitives
         if self.device.type == "cpu" and self.use_fabric:

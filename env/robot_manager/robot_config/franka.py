@@ -34,7 +34,7 @@ def get_robot_config():
                 "panda_finger_joint2": 0.04,
             },
             pos=(0.25, -0.25, 0.0),
-            rot=(0.707, 0, 0, 0.707),
+            rot=(0, 0, 0.707, 0.707),
         ),
         actuators={
             "panda_shoulder": ImplicitActuatorCfg(

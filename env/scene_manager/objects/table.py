@@ -14,13 +14,14 @@ from isaacsim.core.utils.prims import (
 )
 import isaacsim.core.utils.stage as stage_utils
 from isaacsim.core.utils.string import find_unique_string_name
-from isaacsim.replicator.behavior.utils.scene_utils import create_mdl_material
 import numpy as np
 import omni.kit.commands
 from omni.physx.scripts import physicsUtils
 import omni.usd
 from pxr import Gf, Usd, UsdGeom, UsdShade
 import torch
+
+from utils.usd_schema import create_mdl_material
 
 
 def resolve_path(path: str) -> str | None:

@@ -24,10 +24,10 @@ Options:
   --env-cfg NAME        env_cfg stem to validate (default: arx_x5)
   --task NAME           Task name to validate (default: stack_bowls)
   --ckpt NAME           Optional checkpoint directory under policy checkpoints
-  --sim-env NAME        Simulator conda env for Isaac imports (default: RoboDojo)
+  --sim-env NAME        Simulator conda env for runtime checks (default: RoboDojo)
   --policy-env NAME     Optional policy conda env to check
   --summary PATH        Write JSON summary to PATH
-  --skip-isaac          Skip isaacsim/isaaclab import check
+  --skip-isaac          Skip simulator package version/import checks
   --skip-conda          Skip conda env existence checks
   --skip-policy         Skip policy-dir/deploy/checkpoint checks
   -h, --help            Show this help
@@ -188,7 +188,9 @@ else
   record "WARN" "policy processor" "skipped; pass --policy-dir to validate"
 fi
 
-if python3 - <<PY; then
+if python3 - "${ROOT_DIR}" <<'PY'; then
+import sys
+sys.path.insert(0, sys.argv[1])
 from env.global_configs import BENCHMARK, ROOT_DIR
 assert BENCHMARK == "RoboDojo"
 assert ROOT_DIR
@@ -223,13 +225,42 @@ fi
 if [[ "${skip_isaac}" == "true" ]]; then
   record "WARN" "Isaac imports" "skipped by --skip-isaac"
 elif command -v conda >/dev/null 2>&1; then
-  if conda run -n "${sim_env}" python - <<'PY'; then
-import isaacsim  # noqa: F401
-import isaaclab  # noqa: F401
+  if conda run --no-capture-output -n "${sim_env}" python - "${ROOT_DIR}" <<'PY'; then
+from importlib.metadata import version
+from pathlib import Path
+import sys
+
+assert sys.version_info[:2] == (3, 12), f"Expected Python 3.12: {sys.version}"
+for package, expected in {
+    "isaacsim": "6.2.0.0",
+    "torch": "2.11.0+cu130",
+    "torchvision": "0.26.0+cu130",
+    "warp-lang": "1.17.0",
+    "numpy": "2.3.1",
+    "opencv-python-headless-noffmpeg": "4.14.0.94rc3",
+}.items():
+    actual = version(package)
+    assert actual == expected, f"{package}: expected {expected}, found {actual}"
+
+import isaacsim
+import isaaclab
+import curobo
+import torch
+import numba
+import cv2
+
+root = Path(sys.argv[1]).resolve()
+for module, source in ((isaaclab, "IsaacLab"), (curobo, "curobo")):
+    path = Path(module.__file__).resolve()
+    assert path.is_relative_to(root / "third_party" / source), f"Unexpected {module.__name__} source: {path}"
+    print(f"{module.__name__}: {path}")
+assert torch.version.cuda == "13.0", f"Unexpected Torch CUDA runtime: {torch.version.cuda}"
+assert cv2.__version__ == "4.14.0", f"Isaac Sim's OpenCV was overwritten: {cv2.__version__}"
+print(f"Python: {sys.executable}")
 PY
-    record "PASS" "Isaac imports" "isaacsim and isaaclab import in ${sim_env}"
+    record "PASS" "Isaac imports" "Python 3.12, Sim 6.2, pinned Torch/Warp/NumPy and local SDK sources in ${sim_env}"
   else
-    record "FAIL" "Isaac imports" "isaacsim/isaaclab import failed in ${sim_env}"
+    record "FAIL" "Isaac imports" "runtime version, import or SDK source check failed in ${sim_env}"
   fi
 else
   record "FAIL" "Isaac imports" "conda unavailable; cannot check ${sim_env}"

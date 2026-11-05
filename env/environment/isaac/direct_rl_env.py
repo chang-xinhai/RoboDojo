@@ -3,7 +3,9 @@ from isaaclab.envs.direct_rl_env import DirectRLEnv
 
 class CustomDirectRLEnv(DirectRLEnv):
     def sim_step(self, render: bool = True):
-        is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
+        # Preserve the Lab 2 cadence: offscreen support alone did not request
+        # periodic renders. RoboDojo's external cameras render at capture time.
+        is_rendering = self.sim.has_gui or bool(self.sim.get_setting("/isaaclab/render/rtx_sensors"))
 
         for _ in range(self.cfg.decimation):
             self._sim_step_counter += 1

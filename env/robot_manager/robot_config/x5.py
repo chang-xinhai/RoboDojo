@@ -32,7 +32,7 @@ def get_robot_config():
                 "joint8": 0.044,
             },
             pos=(0.25, -0.25, 0.0),
-            rot=(0.707, 0, 0, 0.707),
+            rot=(0, 0, 0.707, 0.707),
         ),
         actuators={
             "arm": ImplicitActuatorCfg(

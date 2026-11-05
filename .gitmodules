@@ -1,6 +1,6 @@
 [submodule "third_party/IsaacLab"]
 	path = third_party/IsaacLab
-	url = https://github.com/yuechen0614/IsaacLab.git
+	url = https://github.com/isaac-sim/IsaacLab.git
 	branch = main
 [submodule "third_party/curobo"]
 	path = third_party/curobo

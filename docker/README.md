@@ -1,5 +1,10 @@
 # Run RoboDojo in Docker
 
+> **Migration branch:** the Dockerfile and instructions below describe the
+> upstream Isaac Sim 5.1 setup. They have not been migrated or validated for
+> Isaac Sim 6.2 / Isaac Lab 3.0. Use the [native installer](../README.md#isaac-sim-62-migration-branch)
+> on this branch.
+
 This image is the **RoboDojo simulation-evaluation side** — Isaac Sim 5.1,
 IsaacLab, CuRobo, the RoboDojo Python stack, and the lightweight XPolicyLab client
 used by `src/eval_client`. It contains **no policy, policy dependencies, or

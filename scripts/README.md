@@ -11,6 +11,11 @@
 
 The installer checks out the submodule commits recorded by RoboDojo, including
 XPolicyLab. It does not advance dependencies to their latest remote branches.
+It creates the `RoboDojo` conda environment with Python 3.12 and installs
+Isaac Sim 6.2 / Isaac Lab 3.0 using the pinned Lab lock and dependency overrides.
+Run `bash scripts/install.sh --install`; an interrupted install can resume with
+`--from submodules`, `isaacsim`, `isaaclab`, `base_deps`, or `curobo`.
+See the [branch installation instructions](../README.md#isaac-sim-62-migration-branch).
 
 ## Typical eval flow
 
@@ -87,7 +92,8 @@ Not intended for direct daily use. Called by `robodojo.sh` or policy utilities.
 
 ## Docker
 
-Container install and smoke tests live under [../docker/](../docker/), not here.
+The [Docker recipe](../docker/) is retained as an upstream Isaac Sim 5.1
+reference and has not been validated for this branch. Use the native installer.
 
 ## Policy-specific scripts
 

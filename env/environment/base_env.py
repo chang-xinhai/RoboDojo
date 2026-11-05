@@ -1,14 +1,21 @@
 from collections.abc import Sequence, Sequence as SequenceABC
 from typing import Any
 
+import carb
 import gymnasium as gym
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab_physx.renderers import IsaacRtxRendererGlobalSettingsCfg
+from isaaclab_physx.renderers.isaac_rtx_renderer_utils import (
+    apply_isaac_rtx_global_settings,
+    ensure_isaac_rtx_render_update,
+)
 from isaaclab_tasks.utils import parse_env_cfg  # this need dynamic import
 from isaacsim.core.utils.stage import get_current_stage
 from omegaconf import DictConfig, OmegaConf
-from omni.physx import acquire_physx_interface
+from omni.physx import get_physx_interface
 
+from env.environment.isaac.core_bridge import CorePhysicsBridge
 from env.environment.isaac.isaac_rl_env import IsaacRLEnv
 from env.seeding import seed_everywhere
 
@@ -60,7 +67,7 @@ DEFAULT_FREQUENCY_SETTINGS = {
     "/app/runLoops/main/rateLimitFrequency": 125,
 }
 
-_RENDER_KEYS = tuple(k for k in DEFAULT_RENDER_CONFIG if k != "carb_settings")
+_RENDER_KEYS = tuple(k for k in DEFAULT_RENDER_CONFIG if k not in ("carb_settings", "rendering_mode"))
 
 
 def _resolve_sim_section(defaults, overrides):
@@ -78,16 +85,49 @@ def _apply_physx_settings(physx_cfg, config):
         setattr(physx_cfg, key, value)
 
 
-def _apply_render_settings(render_cfg, render_config, frequency_settings):
+def _apply_render_settings(render_config, frequency_settings):
+    # Preserve Lab 2.3's rendering presets, which Lab 3 no longer loads from .kit files.
+    mode = render_config.get("rendering_mode") or "balanced"
+    if mode not in ("quality", "balanced", "performance"):
+        raise ValueError(f"Unsupported rendering_mode: {mode!r}")
+    quality, performance = mode == "quality", mode == "performance"
+    render_cfg = IsaacRtxRendererGlobalSettingsCfg(
+        enable_translucency=quality,
+        enable_reflections=quality,
+        enable_global_illumination=quality,
+        enable_shadows=True,
+        enable_ambient_occlusion=quality,
+        ambient_light_intensity=1.0,
+        ambient_occlusion_denoiser_mode=0 if quality else 1,
+        subpixel_mode=1 if quality else 0,
+        enable_cached_raytracing=not performance,
+        enable_dlssg=False,
+        enable_dl_denoiser=not performance,
+        dlss_mode={"quality": 2, "balanced": 1, "performance": 0}[mode],
+        max_samples_per_launch=1000000,
+        view_tile_limit=1000000,
+    )
     for key in _RENDER_KEYS:
-        setattr(render_cfg, key, render_config[key])
+        if render_config[key] is not None:
+            setattr(render_cfg, key, render_config[key])
 
-    carb_settings = render_config.get("carb_settings") or {}
-    if isinstance(carb_settings, DictConfig):
-        carb_settings = OmegaConf.to_container(carb_settings, resolve=True)
-    carb_settings = dict(carb_settings)
+    carb_settings = {
+        "/rtx/reflections/denoiser/enabled": not performance,
+        "/rtx/indirectDiffuse/denoiser/enabled": not performance,
+        "/rtx/directLighting/sampledLighting/enabled": not performance,
+    }
+    if performance:
+        render_cfg.dome_light_upper_lower_strategy = 3
+        carb_settings["/rtx/directLighting/sampledLighting/denoisingTechnique"] = 0
+    overrides = render_config.get("carb_settings") or {}
+    if isinstance(overrides, DictConfig):
+        overrides = OmegaConf.to_container(overrides, resolve=True)
+    carb_settings.update(overrides)
     carb_settings.update(frequency_settings)
     render_cfg.carb_settings = carb_settings
+    apply_isaac_rtx_global_settings(render_cfg)
+    # Replicator 6.2 selects RT2 when applying antialiasing; retain RoboDojo's RTX renderer.
+    carb.settings.get_settings().set("/rtx/rendermode", "RaytracedLighting")
 
 
 class BaseEnv(gym.Env):
@@ -108,6 +148,7 @@ class BaseEnv(gym.Env):
         if self.device != DEFAULT_SIM_DEVICE and not self.use_fabric:
             self.use_fabric = True
         self.sim = None
+        self._core_bridge = None
         self.stage = get_current_stage()
         self.interactiveSceneCfg = kwargs.get("interactiveSceneCfg", None)
 
@@ -149,8 +190,13 @@ class BaseEnv(gym.Env):
                 },
             )
         except Exception:
+            if self._core_bridge is not None:
+                self._core_bridge.close()
+                self._core_bridge = None
             traceback.print_exc()
             raise
+        # Creating a new Kit stage restores RTX defaults, including mode and AA.
+        self.setup_render_settings()
         self.env_spacing = config.scene.env_spacing
         self.sim.env_spacing = self.env_spacing
         self.env_origins = self.sim.scene.env_origins
@@ -172,14 +218,17 @@ class BaseEnv(gym.Env):
             config (DictConfig): The configuration for the environment. This comes from hydra yaml.
         """
         physx_config = _resolve_sim_section(DEFAULT_PHYSX_CONFIG, self.config.get("physx"))
+        self.setup_render_settings()
+        _apply_physx_settings(self.sim_cfg.sim.physics, physx_config)
+
+    def setup_render_settings(self):
         render_config = _resolve_sim_section(DEFAULT_RENDER_CONFIG, self.config.get("render"))
         frequency_settings = _resolve_sim_section(
             DEFAULT_FREQUENCY_SETTINGS,
             self.config.get("frequency_settings"),
         )
 
-        _apply_render_settings(self.sim_cfg.sim.render, render_config, frequency_settings)
-        _apply_physx_settings(self.sim_cfg.sim.physx, physx_config)
+        _apply_render_settings(render_config, frequency_settings)
 
     def sim_step(self, render: bool = True):
         """
@@ -192,12 +241,28 @@ class BaseEnv(gym.Env):
         Setup the physics for the simulation.
         This function will be called after simulation context is created
         """
-        # enable cpu garment and deformable
-        self.physics_interface = acquire_physx_interface()
+        # Preserve the benchmark's GPU dynamics with CPU readback by default.
+        self.physics_interface = get_physx_interface()
         self.physics_interface.overwrite_gpu_setting(1)
 
-        # expose physics context
-        self.physics_context = sim.sim.get_physics_context()
+        self._core_bridge = CorePhysicsBridge(sim.sim)
+        # External Replicator cameras do not register a Lab renderer. Pump Kit on
+        # every requested render, including reset captures that advance no physics.
+        sim.sim.add_render_callback("robodojo_rtx_cameras", self._render_rtx_cameras, order=-20)
+
+    def _render_rtx_cameras(self, _event):
+        if self.use_fabric:
+            ensure_isaac_rtx_render_update(force=True)
+            return
+        # PhysX already publishes to USD. Lab's Fabric conversion would publish
+        # the same body transforms again; retain Core's render-only Kit update.
+        settings = carb.settings.get_settings()
+        play_simulations = settings.get("/app/player/playSimulations")
+        settings.set("/app/player/playSimulations", False)
+        try:
+            self.app.update()
+        finally:
+            settings.set("/app/player/playSimulations", play_simulations)
 
     def close(self):
         try:
@@ -209,18 +274,16 @@ class BaseEnv(gym.Env):
         except Exception as e:
             print("[restart] timeline stop/set failed:", e)
 
-        if self.sim is not None:
-            self.sim.close()
-            self.sim = None
-
         try:
-            import omni.usd
+            if self.sim is not None:
+                self.sim.close()
+        finally:
+            self.sim = None
+            if self._core_bridge is not None:
+                self._core_bridge.close()
+                self._core_bridge = None
 
-            ctx = omni.usd.get_context()
-            ctx.close_stage()
-            ctx.new_stage()
-        except Exception as e:
-            print("[restart] close_stage failed:", e)
+        # Lab closes the stage; the next reset creates and attaches a fresh one.
 
     def update_seed(self, seed: Any | None = None):
         global_seed, _ = self._process_seed_input(seed)

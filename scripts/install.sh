@@ -5,67 +5,41 @@ export PYTHONNOUSERSITE=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CURRENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ISAACLAB_RL_FRAMEWORK="${ISAACLAB_RL_FRAMEWORK:-none}"
+ISAAC_CONSTRAINTS=""
+trap '[[ -z "$ISAAC_CONSTRAINTS" ]] || rm -f "$ISAAC_CONSTRAINTS"' EXIT
 # ── Helpers ────────────────────────────────────────────────────────────────────
 info()  { echo -e "\e[1;32m>>> $*\e[0m"; }
 warn()  { echo -e "\e[1;33m>>> $*\e[0m"; }
 error() { echo -e "\e[1;31m[ERROR] $*\e[0m"; exit 1; }
 pip_install() {
-  python -m pip install "$@"
+  prepare_isaac_constraints
+  uv pip install --python "$CONDA_PREFIX/bin/python" "$@"
 }
-pip_install_with_isaac_constraints() {
-  local constraints
-  constraints="$(mktemp)"
-  cat >"$constraints" <<'EOF'
-numpy==1.26.0
-packaging==23.0
-typing_extensions==4.12.2
-filelock==3.13.1
-websockets==12.0
-scipy==1.15.3
-warp-lang==1.11.0
-click==8.1.7
-psutil==5.9.8
-wheel==0.45.1
-starlette==0.45.3
-stable-baselines3<2.8
-onnx>=1.18,<1.22
-ipython<9
-virtualenv==20.30.0
-EOF
-  if pip_install "$@" --constraint "$constraints"; then
-    rm -f "$constraints"
-  else
-    local status=$?
-    rm -f "$constraints"
-    return "$status"
-  fi
+prepare_isaac_constraints() {
+  [[ -n "$ISAAC_CONSTRAINTS" ]] && return
+  local lab="$CURRENT_DIR/third_party/IsaacLab"
+  local extras=(--extra isaacsim)
+  [[ "$ISAACLAB_RL_FRAMEWORK" == none ]] || extras+=(--extra "$ISAACLAB_RL_FRAMEWORK")
+  [[ -f "$lab/uv.lock" ]] || error "Initialize the pinned IsaacLab submodule before installing dependencies."
+  ISAAC_CONSTRAINTS="$(mktemp)"
+  uv export --project "$lab" --frozen "${extras[@]}" --no-dev --no-hashes \
+    --no-emit-local --output-file "$ISAAC_CONSTRAINTS" >/dev/null
+  # Lab's lock selects NumPy 2.5, which Numba cannot import and cmeel-boost
+  # does not support. Isaac Sim's 2.3.1 pin satisfies all three packages.
+  sed -i 's/^numpy==[^ ;]*/numpy==2.3.1/' "$ISAAC_CONSTRAINTS"
+  # Isaac Lab's tested overrides reconcile Isaac Sim's older dependency pins.
+  # The exported lock keeps those overrides at the versions tested upstream.
+  export UV_CONSTRAINT="$ISAAC_CONSTRAINTS"
+  export UV_TORCH_BACKEND=cu130
+  export UV_INDEX_STRATEGY=unsafe-best-match
 }
-ensure_torch_cuda_stack() {
-  if ! python -m pip show torchaudio &>/dev/null; then
-    warn "    torchaudio missing, installing PyTorch cu128 stack..."
-    pip_install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
-      --index-url https://download.pytorch.org/whl/cu128
-  fi
-}
-pin_runtime_deps() {
-  pip_install \
-    "numpy==1.26.0" \
-    "packaging==23.0" \
-    "typing_extensions==4.12.2" \
-    "filelock==3.13.1" \
-    "websockets==12.0" \
-    "click==8.1.7" \
-    "psutil==5.9.8" \
-    "wheel==0.45.1" \
-    "starlette==0.45.3" \
-    "scipy==1.15.3" \
-    "warp-lang==1.11.0" \
-    "onnx>=1.18,<1.22" \
-    "ipython<9" \
-    "virtualenv==20.30.0"
-  # virtualenv 21.x pulled this in; virtualenv 20.x doesn't need it and it
-  # requires filelock>=3.15.4 (conflicts with isaacsim-core's filelock==3.13.1)
-  python -m pip uninstall -y python-discovery 2>/dev/null || true
+activate_conda() {
+  eval "$(conda shell.bash hook)"
+  conda activate RoboDojo
+  [[ "$CONDA_DEFAULT_ENV" == RoboDojo ]] || error "Failed to activate conda environment 'RoboDojo'"
+  python -c 'import sys; sys.exit(sys.version_info[:2] != (3, 12))' \
+    || error "RoboDojo requires a fresh Python 3.12 environment; the existing environment was not changed."
+  python -m pip install uv==0.13.0
 }
 # ── Step functions ─────────────────────────────────────────────────────────────
 setup_system() {
@@ -103,25 +77,23 @@ setup_conda() {
     conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r 2>/dev/null || true
   fi
   if ! conda env list | grep -q "^RoboDojo "; then
-    info "    Creating conda environment 'RoboDojo' (Python 3.11)..."
-    conda create -n RoboDojo python=3.11 -y
+    info "    Creating conda environment 'RoboDojo' (Python 3.12)..."
+    conda create -n RoboDojo python=3.12 -y
   else
     warn "    Conda environment 'RoboDojo' already exists, skipping..."
   fi
   info "    Activating environment 'RoboDojo'..."
-  source "$HOME/miniconda3/bin/activate" RoboDojo 2>/dev/null || conda activate RoboDojo
-  [[ "$CONDA_DEFAULT_ENV" == "RoboDojo" ]] || error "Failed to activate conda environment 'RoboDojo'"
+  activate_conda
 }
 setup_base_deps() {
-  info "[2/7] Installing base pip dependencies..."
+  info "[5/7] Installing RoboDojo dependencies..."
   pip_install -r "$CURRENT_DIR/scripts/requirements.txt"
-  pip_install opencv-python-headless==4.11.0.86 pillow matplotlib "scipy==1.15.3" scikit-learn
-  pip_install numpy==1.26.0
+  pip_install scikit-learn
 }
 setup_submodules() {
   cd "$CURRENT_DIR" || exit 1
   local subs=(third_party/IsaacLab third_party/curobo XPolicyLab)
-  info "[3/7] Syncing and installing pinned submodules..."
+  info "[2/7] Syncing and installing pinned submodules..."
   git submodule sync "${subs[@]}"
   for sub in "${subs[@]}"; do
     info "    Checking out the recorded commit for ${sub}..."
@@ -134,73 +106,38 @@ setup_submodules() {
     || error "XPolicyLab init failed. Check repo access."
 }
 setup_isaacsim() {
-  if ! python -m pip show isaacsim 2>/dev/null | grep -q "5.1.0"; then
-    info "[4/7] Installing PyTorch + IsaacSim 5.1..."
-    pip_install --upgrade pip
-    pip_install "numpy==1.26.0" "typing_extensions==4.12.2" "filelock==3.13.1"
-    pip_install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
-      --index-url https://download.pytorch.org/whl/cu128
-    pip_install "isaacsim[all,extscache]==5.1.0" --extra-index-url https://pypi.nvidia.com
-    pin_runtime_deps
-  else
-    warn "[4/7] IsaacSim 5.1.0 already installed, skipping..."
-    ensure_torch_cuda_stack
-  fi
+  info "[3/7] Installing Isaac Sim 6.2..."
+  UV_OVERRIDE="$CURRENT_DIR/third_party/IsaacLab/tools/wheel_builder/uv-overrides.txt" \
+    UV_PRERELEASE=allow pip_install "isaacsim[all,extscache]==6.2.0.0" \
+    --extra-index-url https://pypi.nvidia.com
 }
 setup_isaaclab() {
-  cd "$CURRENT_DIR" || exit 1
-  if ! python -m pip show isaaclab &>/dev/null; then
-    info "[5/7] Installing IsaacLab (rl-framework: ${ISAACLAB_RL_FRAMEWORK})..."
-    cd third_party/IsaacLab || error "third_party/IsaacLab not found"
-    export OMNI_KIT_ACCEPT_EULA=YES
-    # isaaclab.sh calls `tabs`; fails when TERM=dumb (CI / piped shells)
-    export TERM=xterm-256color
-    ./isaaclab.sh --install "$ISAACLAB_RL_FRAMEWORK"
-    cd "$CURRENT_DIR"
-    ensure_torch_cuda_stack
-    pin_runtime_deps
-  else
-    warn "[5/7] IsaacLab already installed, skipping..."
-  fi
+  info "[4/7] Installing pinned Isaac Lab 3.0..."
+  prepare_isaac_constraints
+  local extras=isaacsim
+  [[ "$ISAACLAB_RL_FRAMEWORK" == none ]] || extras+=",rl[$ISAACLAB_RL_FRAMEWORK]"
+  export OMNI_KIT_ACCEPT_EULA=YES
+  (cd "$CURRENT_DIR/third_party/IsaacLab" && \
+    UV_OVERRIDE="$CURRENT_DIR/third_party/IsaacLab/tools/wheel_builder/uv-overrides.txt" \
+    UV_PRERELEASE=allow ./isaaclab.sh --install "$extras")
 }
 setup_curobo() {
-  cd "$CURRENT_DIR" || exit 1
-  local need_install=1
-  if python -m pip show nvidia-curobo &>/dev/null; then
-    if python - <<'PY' &>/dev/null
-from curobo.batch_motion_planner import BatchMotionPlanner, MotionPlannerCfg
-from curobo.inverse_kinematics import InverseKinematics, InverseKinematicsCfg
-from curobo.motion_planner import MotionPlanner
-from curobo.types import ToolPoseCriteria
-PY
-    then
-      need_install=0
-    fi
-  fi
-  if [ "$need_install" -eq 1 ]; then
-    info "[6/7] Installing CuRobo..."
-    cd third_party/curobo || error "third_party/curobo not found"
-    python -m pip uninstall -y nvidia-curobo curobo 2>/dev/null || true
-    pip_install_with_isaac_constraints -e ".[cu12]" --no-build-isolation
-    cd "$CURRENT_DIR"
-    pin_runtime_deps
-  else
-    warn "[6/7] CuRobo v2 already installed and importable, skipping..."
-    pin_runtime_deps
-  fi
+  info "[6/7] Installing pinned CuRobo with CUDA 13 runtime compilation..."
+  # The default cuda.core backend uses NVRTC; no system nvcc upgrade is needed.
+  CUROBO_USE_PYBIND=0 pip_install -e "$CURRENT_DIR/third_party/curobo[cu13]"
 }
 # ── Entry point ────────────────────────────────────────────────────────────────
 usage() {
   echo "Usage: $0 [-i | --from <step>]"
   echo "  -i, --install          Full install (all steps)"
   echo "  --from <step>          Resume from a specific step:"
-  echo "                           system | conda | base_deps | submodules | isaacsim | isaaclab | curobo"
+  echo "                           system | conda | submodules | isaacsim | isaaclab | base_deps | curobo"
   echo "  ISAACLAB_RL_FRAMEWORK  IsaacLab RL extras to install (default: none; use all/sb3/skrl/etc. if needed)"
   echo "  -h, --help             Show this help"
 }
 run_from() {
   local from="$1"
-  local steps=(system conda base_deps submodules isaacsim isaaclab curobo)
+  local steps=(system conda submodules isaacsim isaaclab base_deps curobo)
   local start=0
   local found=0
   for i in "${!steps[@]}"; do
@@ -212,8 +149,7 @@ run_from() {
   done
   [ "$found" -eq 1 ] || error "Unknown step '$from'. Valid: ${steps[*]}"
   if [ "$from" != "system" ] && [ "$from" != "conda" ]; then
-    eval "$(conda shell.bash hook)" 2>/dev/null || true
-    source "$HOME/miniconda3/bin/activate" RoboDojo 2>/dev/null || conda activate RoboDojo 2>/dev/null || true
+    activate_conda
   fi
   for i in "${!steps[@]}"; do
     if [ "$i" -ge "$start" ]; then
