@@ -32,7 +32,7 @@ class TiledCaptureManager:
         self.camera_manager = camera_manager
         self.num_envs = num_envs
         self.device = device
-        self.tiled_render_products: List[str] = []  # all the render products
+        self.tiled_render_products: list = []  # render products owned by CameraView
         self.annotator: List[
             List[List[Annotator]]
         ] = []  # Defines the types and devices of annotator. See yaml for camera for more detail
@@ -64,7 +64,7 @@ class TiledCaptureManager:
         2. Get all render_product control
         3. Attach Annotator
         """
-        self.camera_prim_paths.clear()
+        self._clear_capture_resources()
         for env_id in range(self.num_envs):
             self.camera_prim_paths.append([])
             for camera in self.cameras[env_id]:
@@ -183,19 +183,21 @@ class TiledCaptureManager:
         """
         self.init_cameras()
 
-    def destroy(self):
-        """
-        Destroy the capture manager.
-        This function will be called when we close the environment.
-        """
-
+    def _clear_capture_resources(self):
+        for camera in self.tiled_cameras:
+            camera._clean_up_tiled_sensor()
         self.annotator.clear()
         self.annotator_type.clear()
         self.annotator_device.clear()
         self.tiled_cameras.clear()
-        self.cameras.clear()
-        self.camera_names.clear()
-        self.sim = None
-        for rp in self.tiled_render_products:
-            rp.destroy()
+        self.tiled_render_products.clear()
+        self._output_buffers.clear()
         self.camera_prim_paths.clear()
+
+    def destroy(self):
+        """Release capture resources when the environment closes."""
+        self._clear_capture_resources()
+        # These lists belong to CameraManager; release our references only.
+        self.cameras = []
+        self.camera_names = []
+        self.sim = None

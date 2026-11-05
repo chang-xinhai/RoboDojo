@@ -195,7 +195,7 @@ class CameraView(XFormPrim):
         self._output_annotators = output_annotators
         self._annotators = dict()
         self.camera_resolution = camera_resolution
-        self._tiled_render_product = None
+        self._render_product = None
         self._setup_tiled_sensor()
 
     def __del__(self):
@@ -204,11 +204,12 @@ class CameraView(XFormPrim):
 
     def _clean_up_tiled_sensor(self):
         """Clean up the sensor by detaching annotators and destroying render products, and removing related prims."""
-        if self._tiled_render_product is not None:
-            # detach annotators from render product
-            self._tiled_annotator.detach([self._tiled_render_product.path])
-            # delete tiled render products
-            self._tiled_render_product.destroy()
+        if self._render_product is not None:
+            for annotator in self._annotators.values():
+                annotator.detach([self._render_product.path])
+            self._render_product.destroy()
+            self._render_product = None
+            self._annotators.clear()
 
     def _get_tiled_resolution(self, num_cameras, resolution) -> Tuple[int, int]:
         """Calculate the resolution for the tiled sensor based on the number of cameras and individual camera resolution.

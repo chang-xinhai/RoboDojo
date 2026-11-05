@@ -42,7 +42,13 @@ https://private-user-images.githubusercontent.com/88101805/619409345-cc074c5d-45
 
 This branch uses **Isaac Sim 6.2.0.0, Isaac Lab v3.0.0, Python 3.12,
 PyTorch 2.11 (CUDA 13.0), and Warp 1.17** with Isaac Sim's PhysX backend and
-legacy RTX (`RaytracedLighting`), retaining the original RoboDojo backend choices.
+RTX Real-Time Path Tracing (`RealTimePathTracing`). This intentionally establishes
+a new RGB rendering baseline; camera geometry, ground-truth depth definitions
+and physics settings are unchanged.
+The renderer uses current engine defaults with RoboDojo's explicit settings
+(translucency, reflections, global illumination and DLAA). The removed Lab 2
+`rendering_mode` presets are not recreated; use individual `render` settings
+for overrides.
 Isaac Lab, cuRobo and XPolicyLab are fixed by the recorded submodule commits.
 `fold_clothes` and `fold_clothes_random` use official PhysX **surface FEM**.
 This is a **new cloth physics baseline**, not numerically or behaviorally
@@ -114,14 +120,15 @@ The existing Docker recipe targets the upstream 5.1 stack and is **not validated
 for this branch**. Use the native installer above.
 
 Validation uses the installed native environment, an RTX 5090, and headless
-ARX X5 evaluation. Seven Precision tasks passed short reset/action checks;
+ARX X5 evaluation. Earlier migration checks used the legacy RTX renderer:
+seven Precision tasks passed short reset/action checks;
 articulation, particle-fluid and conveyor scenes were also exercised. A frozen
 308-action `insert_tubes` replay retained score 100 and all reward decisions,
 with maximum end-effector position difference of 0.268 mm and three-view videos.
 The 320-command dataset replay completed, but did not succeed; without the full
 demonstration object checkpoint it verifies robot commands, not contact replay.
 
-With unchanged VPP2 weights/settings, seed 1 and layout 0, `insert_tubes`
+In those earlier checks, with unchanged VPP2 weights/settings, seed 1 and layout 0, `insert_tubes`
 succeeded in 307 actions (old-runtime control: 308); `pour_balls_into_vase`
 succeeded and `plug_in_charger` reached its 400-action limit without success.
 This is a representative sample, not a full-suite equivalence result. Rendering
@@ -129,6 +136,14 @@ appearance differences remain. `fill_egg_holder` layout 0 failed the original
 reset stability check (30.046° rotation against a 30° limit); its thresholds
 were retained. Interactive GUI evaluation remains unvalidated: the window
 opened, but the bounded startup test ended during initial shader compilation.
+
+The current RTX defaults were checked separately with 30 original `insert_tubes`
+actions across two resets: actions, rewards and sampled robot/object states
+matched the earlier replay, with fresh three-camera delivery and valid RGB/GT depth.
+A complete VPP2 episode succeeded in 309 actions with the same weights/settings,
+and a short FEM scene check passed. Both policy processes exited normally and
+three 310-frame videos were recorded. This single episode does not establish
+success-rate equivalence across the benchmark.
 
 The [RoboDojo documentation](https://robodojo-benchmark.com/doc/) is the canonical reference. Key sections:
 

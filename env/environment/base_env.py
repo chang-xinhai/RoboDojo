@@ -59,16 +59,12 @@ DEFAULT_RENDER_CONFIG = {
     "samples_per_pixel": None,
     "enable_shadows": None,
     "enable_ambient_occlusion": None,
-    "rendering_mode": "quality",
     "carb_settings": None,
 }
 
 DEFAULT_FREQUENCY_SETTINGS = {
     "/app/runLoops/main/rateLimitFrequency": 125,
 }
-
-_RENDER_KEYS = tuple(k for k in DEFAULT_RENDER_CONFIG if k not in ("carb_settings", "rendering_mode"))
-
 
 def _resolve_sim_section(defaults, overrides):
     merged = dict(defaults)
@@ -86,48 +82,14 @@ def _apply_physx_settings(physx_cfg, config):
 
 
 def _apply_render_settings(render_config, frequency_settings):
-    # Preserve Lab 2.3's rendering presets, which Lab 3 no longer loads from .kit files.
-    mode = render_config.get("rendering_mode") or "balanced"
-    if mode not in ("quality", "balanced", "performance"):
-        raise ValueError(f"Unsupported rendering_mode: {mode!r}")
-    quality, performance = mode == "quality", mode == "performance"
-    render_cfg = IsaacRtxRendererGlobalSettingsCfg(
-        enable_translucency=quality,
-        enable_reflections=quality,
-        enable_global_illumination=quality,
-        enable_shadows=True,
-        enable_ambient_occlusion=quality,
-        ambient_light_intensity=1.0,
-        ambient_occlusion_denoiser_mode=0 if quality else 1,
-        subpixel_mode=1 if quality else 0,
-        enable_cached_raytracing=not performance,
-        enable_dlssg=False,
-        enable_dl_denoiser=not performance,
-        dlss_mode={"quality": 2, "balanced": 1, "performance": 0}[mode],
-        max_samples_per_launch=1000000,
-        view_tile_limit=1000000,
-    )
-    for key in _RENDER_KEYS:
-        if render_config[key] is not None:
-            setattr(render_cfg, key, render_config[key])
-
-    carb_settings = {
-        "/rtx/reflections/denoiser/enabled": not performance,
-        "/rtx/indirectDiffuse/denoiser/enabled": not performance,
-        "/rtx/directLighting/sampledLighting/enabled": not performance,
-    }
-    if performance:
-        render_cfg.dome_light_upper_lower_strategy = 3
-        carb_settings["/rtx/directLighting/sampledLighting/denoisingTechnique"] = 0
-    overrides = render_config.get("carb_settings") or {}
-    if isinstance(overrides, DictConfig):
-        overrides = OmegaConf.to_container(overrides, resolve=True)
-    carb_settings.update(overrides)
+    # Keep RoboDojo's explicit settings; leave engine defaults to Isaac Lab 3.
+    settings = dict(render_config)
+    carb_settings = dict(settings.pop("carb_settings") or {})
+    if "rendering_mode" in settings:
+        raise ValueError("Isaac Lab 3 removed rendering_mode presets; configure individual render settings instead.")
     carb_settings.update(frequency_settings)
-    render_cfg.carb_settings = carb_settings
+    render_cfg = IsaacRtxRendererGlobalSettingsCfg(**settings, carb_settings=carb_settings)
     apply_isaac_rtx_global_settings(render_cfg)
-    # Replicator 6.2 selects RT2 when applying antialiasing; retain RoboDojo's RTX renderer.
-    carb.settings.get_settings().set("/rtx/rendermode", "RaytracedLighting")
 
 
 class BaseEnv(gym.Env):

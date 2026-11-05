@@ -27,8 +27,6 @@ does not advance physics.
 
 from __future__ import annotations
 
-from typing import Optional
-
 _DISPATCHER_PATH = "/Render/PostProcess/SDGPipeline/PostProcessDispatcher"
 
 # Kit settings that make each app update wait for its own rendered frame.
@@ -89,7 +87,7 @@ def _truthy(value) -> bool:
     return bool(value)
 
 
-def dispatcher_time() -> Optional[float]:
+def dispatcher_time() -> float | None:
     """Reference time of the last frame the SDG pipeline dispatched."""
     try:
         import omni.graph.core as og
@@ -134,9 +132,13 @@ def wait_for_latest_cameras(
 
     With the zero-delay settings one delivered frame carries the current
     physics state. Without them the pipeline is one frame deep, so one more
-    delivery is required. Returns the number of ``env.render()`` calls made.
+    delivery is required. Returns the number of ``env.render()`` calls made,
+    or zero when the supplied manager has no camera products. With no manager,
+    the fence watches the global dispatcher. Raises ``RuntimeError`` if
+    the dispatcher does not deliver enough frames within the render budget.
     """
-    del capture_manager  # kept for call compatibility; the fence is global
+    if capture_manager is not None and not capture_manager.tiled_render_products:
+        return 0
     required = max(1, int(min_passes))
     if not zero_delay_active():
         _warn_missing_settings()
@@ -152,12 +154,15 @@ def wait_for_latest_cameras(
         env.render()
         passes += 1
         stamp = dispatcher_time()
-        if stamp is None or last_stamp is None:
-            # No dispatcher clock to watch: fall back to counting renders.
-            delivered = passes
-        elif stamp != last_stamp:
-            delivered += 1
-        last_stamp = stamp
+        if stamp is not None:
+            # An initially unavailable clock only establishes a baseline.
+            # Rendering alone is not evidence that SDG delivered a frame.
+            if last_stamp is not None and stamp != last_stamp:
+                delivered += 1
+            last_stamp = stamp
         if delivered >= required:
-            break
-    return passes
+            return passes
+    raise RuntimeError(
+        f"Camera synchronization failed: SDG delivered {delivered}/{required} "
+        f"new frames after {passes} renders (last dispatcher time: {last_stamp!r})."
+    )

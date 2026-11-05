@@ -161,7 +161,6 @@ def _launch_app_with_legacy_extensions(args):
         "isaacsim.sensors.camera",
         "--enable",
         "isaacsim.asset.gen.conveyor",
-        "--/persistent/rtx/modes/rt/enabled=true",
     ]
     try:
         return AppLauncher(args)
