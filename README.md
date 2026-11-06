@@ -136,6 +136,13 @@ these are simulation settings, not factory calibration. Each camera's native
 grayscale images with calibration and representation metadata. Evaluation also
 records separate `_ir_left` and `_ir_right` video streams.
 
+On `DepthRSI`, the entire stereo/projector rig is translated 25 mm along the
+ordinary camera's local +X axis: left IR coincides with RGB, the projector is at
++25 mm and right IR at +50 mm. Left IR inherits RGB's orientation, intrinsics and
+resolution, so reconstructed left-view optical-Z depth shares the RGB/GT depth
+pixel grid without reprojection. Reconstruction outputs must retain this grid
+and use metres before replacing GT depth in a downstream RGBD pipeline.
+
 The Sim 6.2 photometric baseline uses projector intensities of 35 for the head
 and 6 for each wrist, with 2 ms exposure, ISO 400, exposure f/10 and responsivity
 1.10267. The reference's 1 m projector dimensions and disabled normalization are

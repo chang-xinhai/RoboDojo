@@ -56,7 +56,9 @@ class StructuredLightManager:
             if ordinary is None:
                 raise ValueError(f"Structured light requires camera role {role!r}.")
             self._keys[role] = []
-            for eye, x in (("left", -self.BASELINE_M / 2), ("right", self.BASELINE_M / 2)):
+            # Translate the whole rig by half a baseline so left IR shares the
+            # ordinary camera's optical frame, intrinsics and pixel grid.
+            for eye, x in (("left", 0.0), ("right", self.BASELINE_M)):
                 cfg = deepcopy(ordinary)
                 cfg.prim_path += f"/structured_light_{eye}"
                 cfg.offset = CameraCfg.OffsetCfg(pos=(x, 0.0, 0.0), rot=(0.0, 0.0, 0.0, 1.0), convention="opengl")
@@ -200,6 +202,9 @@ class StructuredLightManager:
                 role_index = self.camera_manager.camera_names[0].index(role)
                 projector_poses = [self.camera_manager.get_camera_extrinsics(role_index, i)
                                    for i in range(self.camera_manager.num_envs)]
+                for pose in projector_poses:
+                    # Keep the projector midway between the translated eyes.
+                    pose[:3, 3] += pose[:3, 0] * (self.BASELINE_M / 2)
                 for (gate, op), pose in zip(self.projectors[role], projector_poses):
                     op.Set(Gf.Matrix4d((pose @ np.diag([1., -1., -1., 1.])).T.tolist()))
                     gate.GetVisibilityAttr().Set("inherited")
