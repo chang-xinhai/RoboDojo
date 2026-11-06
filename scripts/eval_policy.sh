@@ -27,9 +27,19 @@ host="localhost"
 protocol=""
 policy_server_url=""
 extra_args=()
+structured_light="${ROBODOJO_STRUCTURED_LIGHT:-false}"
+structured_light_pattern="${ROBODOJO_STRUCTURED_LIGHT_PATTERN:-}"
+sl_args=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --structured-light)
+      structured_light="true"; shift ;;
+    --structured-light-pattern)
+      if [[ $# -lt 2 || "$2" == --* ]]; then
+        echo "[ERROR] Missing value for --structured-light-pattern" >&2; exit 2
+      fi
+      structured_light_pattern="$2"; shift 2 ;;
     --root_dir|--task_name|--env_cfg_type|--device_id|--policy_name|--port|--eval_batch|--additional_info|--seed|--host|--protocol|--policy_server_url)
       if [[ $# -lt 2 || "$2" == --* ]]; then
         echo "[ERROR] Missing value for argument: $1"
@@ -58,6 +68,24 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "${structured_light_pattern}" ]]; then
+  if [[ "${structured_light}" != "true" ]]; then
+    echo "[ERROR] --structured-light-pattern requires --structured-light" >&2; exit 2
+  fi
+  if [[ ! -f "${structured_light_pattern}" ]]; then
+    echo "[ERROR] Structured-light pattern file not found: ${structured_light_pattern}" >&2; exit 2
+  fi
+  if [[ "${structured_light_pattern}" != /* ]]; then
+    structured_light_pattern="${PWD}/${structured_light_pattern}"
+  fi
+fi
+if [[ "${structured_light}" == "true" ]]; then
+  sl_args+=(--structured-light)
+  if [[ -n "${structured_light_pattern}" ]]; then
+    sl_args+=(--structured-light-pattern "${structured_light_pattern}")
+  fi
+fi
 
 for var_name in root_dir task_name env_cfg_type device_id policy_name port; do
   if [[ -z "${!var_name}" ]]; then
@@ -147,6 +175,7 @@ while : ; do
     --seed "$seed" \
     --host "$host" \
     --headless \
+    "${sl_args[@]}" \
     "${extra_args[@]}" \
     "$@"
   rc=$?

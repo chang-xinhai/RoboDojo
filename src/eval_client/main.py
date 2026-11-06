@@ -3,6 +3,7 @@ from datetime import datetime
 import importlib
 import json
 import os
+from pathlib import Path
 import sys
 
 from isaaclab.app import add_launcher_args, launch_simulation
@@ -60,11 +61,21 @@ parser.add_argument(
 
 parser.add_argument("--seed", type=int, required=True, help="policy seed for eval")
 
+parser.add_argument("--structured-light", action="store_true", help="Enable optional structured-light capture.")
+parser.add_argument("--structured-light-pattern", type=str, help="Local pattern file; requires --structured-light.")
+
 # Preserve RoboDojo's evaluation CLI; these are public Kit launcher configuration inputs.
 parser.add_argument("--headless", action="store_true", help="Run without a viewport.")
 parser.add_argument("--enable_cameras", action="store_true", help="Enable camera outputs (always enabled for evaluation).")
 add_launcher_args(parser)
 args_cli = parser.parse_args()
+if args_cli.structured_light_pattern:
+    if not args_cli.structured_light:
+        parser.error("--structured-light-pattern requires --structured-light")
+    pattern = Path(args_cli.structured_light_pattern).expanduser().resolve()
+    if not pattern.is_file():
+        parser.error(f"Structured-light pattern file not found: {pattern}")
+    args_cli.structured_light_pattern = str(pattern)
 if not args_cli.headless and args_cli.visualizer is None:
     args_cli.visualizer = ["kit"]
 
@@ -319,6 +330,11 @@ def main():
     OmegaConf.update(env_cfg, "eval_cfg.num_envs", num_envs, force_add=True)
     env_cfg = process_randomization(env_cfg)
     env_cfg, eval_num = process_config(env_cfg, task_name=task_name)
+    # Some task profiles replace camera configuration in process_config.
+    if args_cli.structured_light:
+        OmegaConf.update(env_cfg, "camera.structured_light.enabled", True, force_add=True)
+        if args_cli.structured_light_pattern:
+            OmegaConf.update(env_cfg, "camera.structured_light.pattern", args_cli.structured_light_pattern, force_add=True)
 
     if os.environ.get("EVAL_NUM"):
         _env_eval_num = os.environ.get("EVAL_NUM")

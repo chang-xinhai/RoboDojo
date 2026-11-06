@@ -95,6 +95,9 @@ run_eval() {
   local eval_env="RoboDojo"
   local policy_dir=""
   local eval_num="${EVAL_NUM:-}"
+  local structured_light="${ROBODOJO_STRUCTURED_LIGHT:-false}"
+  local structured_light_pattern="${ROBODOJO_STRUCTURED_LIGHT_PATTERN:-}"
+  local sl_env=()
   local dry_run="false"
 
   while [[ $# -gt 0 ]]; do
@@ -112,6 +115,8 @@ run_eval() {
       --eval-env) need_value "$@"; eval_env="$2"; shift 2 ;;
       --policy-dir) need_value "$@"; policy_dir="$(abs_path "$2")"; shift 2 ;;
       --eval-num) need_value "$@"; eval_num="$2"; shift 2 ;;
+      --structured-light) structured_light="true"; shift ;;
+      --structured-light-pattern) need_value "$@"; structured_light_pattern="$2"; shift 2 ;;
       --dry-run) dry_run="true"; shift ;;
       -h|--help)
         cat <<'EOF'
@@ -132,6 +137,8 @@ Common options:
   --policy-gpu ID       Policy server GPU (default: 0)
   --env-gpu ID          Isaac Sim GPU (default: 0)
   --eval-env ENV        Simulator conda env (default: RoboDojo)
+  --structured-light    Enable optional structured-light capture
+  --structured-light-pattern PATH  Local pattern file (requires --structured-light)
   --dry-run             Print command without running it
 
 Split / multi-machine: use `robodojo.sh server` + `robodojo.sh client` (see docs/SPLIT_EVAL.md).
@@ -144,6 +151,22 @@ EOF
         ;;
     esac
   done
+
+  if [[ -n "${structured_light_pattern}" ]]; then
+    if [[ "${structured_light}" != "true" ]]; then
+      echo "[robodojo] --structured-light-pattern requires --structured-light" >&2; return 2
+    fi
+    if [[ ! -f "${structured_light_pattern}" ]]; then
+      echo "[robodojo] Structured-light pattern file not found: ${structured_light_pattern}" >&2; return 2
+    fi
+    if [[ "${structured_light_pattern}" != /* ]]; then
+      structured_light_pattern="${PWD}/${structured_light_pattern}"
+    fi
+  fi
+  sl_env=("ROBODOJO_STRUCTURED_LIGHT=${structured_light}" "ROBODOJO_STRUCTURED_LIGHT_PATTERN=${structured_light_pattern}")
+  if [[ "${structured_light}" == "true" ]]; then
+    printf '[robodojo] structured-light enabled; pattern=%q\n' "${structured_light_pattern:-gemini335L}"
+  fi
 
   if [[ -z "${policy_dir}" || -z "${task}" || -z "${ckpt}" || -z "${policy_env}" ]]; then
     echo "[robodojo eval] --policy-dir, --task, --ckpt, and --policy-env are required" >&2
@@ -192,7 +215,9 @@ EOF
   echo "[robodojo eval] task=${task} env_cfg=${env_cfg} eval_num=${EVAL_NUM:-default}"
 
   if [[ "${dry_run}" == "true" ]]; then
-    printf '[robodojo eval] dry-run: bash %q' "${ROOT_DIR}/scripts/internal/run_policy_eval.sh"
+    printf '[robodojo eval] dry-run: '
+    if [[ "${structured_light}" == "true" ]]; then printf 'env %q %q ' "${sl_env[@]}"; fi
+    printf 'bash %q' "${ROOT_DIR}/scripts/internal/run_policy_eval.sh"
     printf ' %q' "${policy_dir}"
     printf ' %q' "${eval_args[@]}"
     printf '\n'
@@ -202,7 +227,7 @@ EOF
   local start_sec end_sec elapsed_sec
   start_sec="$(date +%s)"
   (
-    bash "${ROOT_DIR}/scripts/internal/run_policy_eval.sh" "${policy_dir}" "${eval_args[@]}"
+    env "${sl_env[@]}" bash "${ROOT_DIR}/scripts/internal/run_policy_eval.sh" "${policy_dir}" "${eval_args[@]}"
   )
   end_sec="$(date +%s)"
   elapsed_sec=$((end_sec - start_sec))
@@ -345,6 +370,9 @@ run_client() {
   local tasks_file=""
   local dimensions=""
   local limit=""
+  local structured_light="${ROBODOJO_STRUCTURED_LIGHT:-false}"
+  local structured_light_pattern="${ROBODOJO_STRUCTURED_LIGHT_PATTERN:-}"
+  local sl_env=()
   local dry_run="false"
 
   while [[ $# -gt 0 ]]; do
@@ -373,6 +401,8 @@ run_client() {
         ;;
       --all) shift ;;
       --limit) need_value "$@"; limit="$2"; shift 2 ;;
+      --structured-light) structured_light="true"; shift ;;
+      --structured-light-pattern) need_value "$@"; structured_light_pattern="$2"; shift 2 ;;
       --dry-run) dry_run="true"; shift ;;
       -h|--help)
         cat <<'EOF'
@@ -411,6 +441,8 @@ Common options:
   --tasks-file PATH      Batch mode task subset file
   --dimension NAMES      Batch mode capability dimensions
   --limit NUM            Batch mode task limit after filtering
+  --structured-light    Enable optional structured-light capture
+  --structured-light-pattern PATH  Local pattern file (requires --structured-light)
   --dry-run              Print the resolved eval_policy.sh command without running it
 EOF
         return 0
@@ -421,6 +453,22 @@ EOF
         ;;
     esac
   done
+
+  if [[ -n "${structured_light_pattern}" ]]; then
+    if [[ "${structured_light}" != "true" ]]; then
+      echo "[robodojo] --structured-light-pattern requires --structured-light" >&2; return 2
+    fi
+    if [[ ! -f "${structured_light_pattern}" ]]; then
+      echo "[robodojo] Structured-light pattern file not found: ${structured_light_pattern}" >&2; return 2
+    fi
+    if [[ "${structured_light_pattern}" != /* ]]; then
+      structured_light_pattern="${PWD}/${structured_light_pattern}"
+    fi
+  fi
+  sl_env=("ROBODOJO_STRUCTURED_LIGHT=${structured_light}" "ROBODOJO_STRUCTURED_LIGHT_PATTERN=${structured_light_pattern}")
+  if [[ "${structured_light}" == "true" ]]; then
+    printf '[robodojo] structured-light enabled; pattern=%q\n' "${structured_light_pattern:-gemini335L}"
+  fi
 
   if [[ -n "${policy_dir}" ]]; then
     validate_policy_dir "${policy_dir}" "client"
@@ -491,7 +539,7 @@ EOF
     if [[ "${dry_run}" == "true" ]]; then
       batch_args+=(--dry-run)
     fi
-    bash "${ROOT_DIR}/scripts/internal/smoke_all_tasks.sh" "${batch_args[@]}"
+    env "${sl_env[@]}" bash "${ROOT_DIR}/scripts/internal/smoke_all_tasks.sh" "${batch_args[@]}"
     return $?
   fi
 
@@ -529,6 +577,10 @@ EOF
   if [[ "${dry_run}" == "true" ]]; then
     printf '[robodojo client] dry-run: bash %q' "${ROOT_DIR}/scripts/eval_policy.sh"
     printf ' %q' "${client_args[@]}"
+    if [[ "${structured_light}" == "true" ]]; then
+      printf ' --structured-light'
+      if [[ -n "${structured_light_pattern}" ]]; then printf ' --structured-light-pattern %q' "${structured_light_pattern}"; fi
+    fi
     printf '\n'
     return 0
   fi
@@ -543,7 +595,7 @@ EOF
     echo "[robodojo client]   - the port is correct and not blocked by a firewall" >&2
   fi
 
-  bash "${ROOT_DIR}/scripts/eval_policy.sh" "${client_args[@]}"
+  env "${sl_env[@]}" bash "${ROOT_DIR}/scripts/eval_policy.sh" "${client_args[@]}"
 }
 
 run_sweep() {

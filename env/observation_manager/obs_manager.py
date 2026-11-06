@@ -152,6 +152,14 @@ class ObsManager:
                         if self.collect_depth:
                             cam_data["depth"] = raw.astype(np.float32)
 
+            structured_light = self.capture_manager.structured_light
+            if structured_light is not None:
+                for env_idx in env_idx_list:
+                    for role in structured_light.ROLES:
+                        obs[env_idx]["vision"].setdefault(role, {})["structured_light"] = (
+                            structured_light.observation(env_idx, role)
+                        )
+
             if self.collect_intrinsic_matrix or self.collect_extrinsic_matrix:
                 for ith in range(self.camera_manager.num_cams):
                     for idx, env_idx in enumerate(env_idx_list):

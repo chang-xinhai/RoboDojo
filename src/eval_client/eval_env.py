@@ -874,11 +874,11 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             return [idx for idx in range(self.num_envs) if not self.end_flag[idx]]
 
         def _stream_vision(self, env_idx, frame):
-            """Append this env's per-camera RGB frames to its ffmpeg streams.
+            """Append ordinary RGB and optional grayscale stereo to video streams.
 
-            Only the vision ("color") data is recorded; writers are created
-            lazily on the first frame (when the resolution is known) and write
-            to temporary files until the episode outcome decides the name.
+            Writers are created lazily and finalized with the episode outcome.
+            Stereo streams use three identical channels for the existing encoder;
+            the observation retains the original single-channel arrays.
             """
             vision = frame.get("vision") if isinstance(frame, dict) else None
             if not vision:
@@ -886,17 +886,26 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             writers = self.video_writers.setdefault(env_idx, {})
             fps = self.obs_manager.collect_freq
             for cam_key, cam_data in vision.items():
-                color = cam_data.get("color") if isinstance(cam_data, dict) else None
-                if color is None:
+                if not isinstance(cam_data, dict):
                     continue
-                color = np.ascontiguousarray(color)
-                if color.ndim != 3 or color.shape[2] not in (3, 4):
-                    continue
-                if cam_key not in writers:
-                    height, width, channels = color.shape
-                    tmp_path = os.path.join(self._stream_dir, f"env{env_idx}_{cam_key}.tmp.mp4")
-                    writers[cam_key] = VideoStreamWriter(tmp_path, height, width, channels, fps=fps)
-                writers[cam_key].append(color)
+                streams = {cam_key: cam_data.get("color")}
+                for eye, gray in cam_data.get("structured_light", {}).items():
+                    if eye not in ("left", "right"):
+                        continue
+                    if gray.ndim != 2 or gray.dtype != np.uint8:
+                        raise ValueError(f"Structured-light {cam_key}/{eye} must be a uint8 grayscale image.")
+                    streams[f"{cam_key}_ir_{eye}"] = np.repeat(gray[..., None], 3, axis=-1)
+                for stream_key, color in streams.items():
+                    if color is None:
+                        continue
+                    color = np.ascontiguousarray(color)
+                    if color.ndim != 3 or color.shape[2] not in (3, 4):
+                        continue
+                    if stream_key not in writers:
+                        height, width, channels = color.shape
+                        tmp_path = os.path.join(self._stream_dir, f"env{env_idx}_{stream_key}.tmp.mp4")
+                        writers[stream_key] = VideoStreamWriter(tmp_path, height, width, channels, fps=fps)
+                    writers[stream_key].append(color)
 
         def _sweep_stream_dir(self):
             """Remove orphan temp videos left by a previous hard kill/crash."""

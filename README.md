@@ -120,6 +120,36 @@ The old garment PBD
 configuration and shared cloth/fluid particle-system mode are not supported.
 These values define this migration baseline, not a fit to measured fabric.
 
+### Optional structured-light capture
+
+Add `--structured-light` to `scripts/robodojo.sh eval` or `client` to capture
+grayscale stereo alongside the ordinary RGB cameras. The feature is off by
+default. Select another local pattern with
+`--structured-light --structured-light-pattern /path/to/pattern.png`;
+`scripts/eval_policy.sh` and the Python evaluation entry accept the same flags.
+
+The default Gemini pattern comes from the supplied
+[reference revision](https://github.com/chang-xinhai/RoboDojo/tree/fedfd65cb5fd434b911e985f9dd3581fd48567dc/env_cfg/camera/pattern).
+The 50 mm virtual stereo baseline and projector coverage follow that reference;
+these are simulation settings, not factory calibration. Each camera's native
+`vision[role].structured_light` observation contains `left` and `right` uint8
+grayscale images with calibration and representation metadata. Evaluation also
+records separate `_ir_left` and `_ir_right` video streams.
+
+The Sim 6.2 photometric baseline uses projector intensities of 35 for the head
+and 6 for each wrist, with 2 ms exposure, ISO 400, exposure f/10 and responsivity
+1.10267. The reference's 1 m projector dimensions and disabled normalization are
+retained. These renderer settings were selected from measured saturation and
+pattern correspondence; they do not specify measured projector power. IR
+antialiasing is disabled because DLAA smoothed the dense projected dots in the
+native pipeline. This override applies only to the stereo render products;
+ordinary RGB keeps its current RTX settings.
+
+Projection uses Isaac Sim's official `StructuredLightCamera`. Its output models
+visible-spectrum illumination displayed in grayscale; it is not a spectral NIR
+sensor model. Ordinary RGB and GT optical-Z depth retain their definitions.
+Depth reconstruction and tactile sensing are not included.
+
 ## 🗂️ Repository Structure
 
 ```text

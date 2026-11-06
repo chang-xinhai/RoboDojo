@@ -63,7 +63,9 @@ class TaskEnv(BaseEnv):
         # Finalize robot mounts and camera declarations before the scene clone plan is built.
         self.interactiveSceneCfg = self.robot_manager._get_SceneCfg(
             num_envs=self.num_envs, env_spacing=self.env_spacing, replicate_physics=False)
-        for key, camera_cfg in self.camera_manager.scene_configs().items():
+        camera_configs = self.camera_manager.scene_configs()
+        camera_configs.update(self.capture_manager.scene_configs(camera_configs))
+        for key, camera_cfg in camera_configs.items():
             if hasattr(self.interactiveSceneCfg, key):
                 raise ValueError(f"Duplicate scene entity: {key}")
             setattr(self.interactiveSceneCfg, key, camera_cfg)

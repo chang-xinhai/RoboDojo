@@ -22,9 +22,19 @@ class CaptureManager:
         self.num_envs = num_envs
         self.camera_manager = camera_manager
         self.sim = None
+        self.structured_light = None
+        sl_config = config.get("structured_light", {}) or {}
+        if sl_config.get("enabled", False):
+            from env.camera_manager.structured_light import StructuredLightManager
+            self.structured_light = StructuredLightManager(sl_config, camera_manager)
+
+    def scene_configs(self, ordinary_configs):
+        return {} if self.structured_light is None else self.structured_light.scene_configs(ordinary_configs)
 
     def initialize(self, sim):
         self.sim = sim
+        if self.structured_light is not None:
+            self.structured_light.bind(sim.scene)
 
     def capture(self, render: Callable[[], None], passes: int = 1):
         """Render and refresh cameras through public APIs without advancing physics.
@@ -35,12 +45,15 @@ class CaptureManager:
         """
         if passes < 1:
             raise ValueError("Capture requires at least one render pass.")
-        for _ in range(passes):
+        # Resuming a paused native product needs one update before its next delivery.
+        for _ in range(max(passes, 2) if self.structured_light is not None else passes):
             render()
             for camera in self.camera_manager.cameras:
                 if not camera.is_initialized:
                     raise RuntimeError(f"Camera {camera.cfg.prim_path} is not initialized.")
                 camera.update(0.0, force_recompute=True)
+        if self.structured_light is not None:
+            self.structured_light.capture(render)
 
     def step(self, env_ids: Sequence[int] | None = None, cam_ids: Sequence[int] | None = None):
         """Snapshot native buffers in caller-selected environment/role order."""
@@ -65,6 +78,10 @@ class CaptureManager:
 
     def reset(self):
         """Sensors are invalidated by scene/CameraManager.reset, with no reattach."""
+        if self.structured_light is not None:
+            self.structured_light.reset()
 
     def destroy(self):
+        if self.structured_light is not None:
+            self.structured_light.destroy()
         self.sim = None
