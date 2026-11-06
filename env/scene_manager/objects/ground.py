@@ -5,23 +5,13 @@ from pathlib import Path
 import random
 from typing import Dict, List
 
-from isaacsim.core.api.materials import PreviewSurface
-from isaacsim.core.prims import SingleGeometryPrim
-import isaacsim.core.utils.prims as prims_utils
-from isaacsim.core.utils.prims import (
-    get_prim_at_path,
-    is_prim_path_valid,
-)
-from isaacsim.core.utils.stage import get_current_stage
-from isaacsim.core.utils.string import find_unique_string_name
-from isaacsim.replicator.behavior.utils.scene_utils import create_mdl_material
+from isaaclab.sim.utils import get_current_stage
 import numpy as np
 from omegaconf import DictConfig
-import omni.kit.commands
-from pxr import Gf, Sdf, UsdGeom, UsdShade
-
-from env.global_configs import *
-from env.scene_manager.objects.physics_material import PhysicsMaterial
+from pxr import Gf, Sdf, UsdGeom, UsdPhysics
+from env.global_configs import ASSETS_PATH
+from .physics_material import PhysicsMaterial
+from .scene_object import bind_material, color_material, mdl_material, set_pose
 
 
 def resolve_mdl_paths(mdl_path_or_folder: str) -> List[str]:
@@ -146,23 +136,17 @@ class Ground:
 
     def create(self):
         """Create the ground plane in the USD stage."""
-        # Prepare physics material
-        physics_material_path = find_unique_string_name(
-            initial_name=f"{self.prim_path}/physics_material",
-            is_unique_fn=lambda x: not is_prim_path_valid(x),
-        )
-        physics_material = PhysicsMaterial(
-            prim_path=physics_material_path,
-            config=self.physics_material_config,
-        )
-        # Create ground using cube or plane geometry
-        if self.geometry_type == "cube":
-            self._create_cube_ground(physics_material)
-        elif self.geometry_type == "plane":
-            self._create_plane_ground(physics_material)
+        if self.geometry_type == 'cube':
+            self._create_cube_ground(None)
+        elif self.geometry_type == 'plane':
+            self._create_plane_ground(None)
         else:
-            print(f"Warning: Unknown geometry type '{self.geometry_type}', using cube.")
-            self._create_cube_ground(physics_material)
+            raise ValueError(f'Unsupported ground geometry: {self.geometry_type}')
+        self.geometry_prim = self.stage.GetPrimAtPath(self.prim_path)
+        UsdPhysics.CollisionAPI.Apply(self.geometry_prim).CreateCollisionEnabledAttr().Set(True)
+        UsdPhysics.MeshCollisionAPI.Apply(self.geometry_prim).CreateApproximationAttr().Set('none')
+        material = PhysicsMaterial(f'{self.prim_path}/physics_material', config=self.physics_material_config)
+        bind_material(self.geometry_prim, str(material.material.GetPath()), physics=True)
 
     def _create_cube_ground(self, physics_material):
         """Create ground using a Mesh primitive (Cube shape) with UVs."""
@@ -279,27 +263,10 @@ class Ground:
 
         # Apply scale to match desired size (base size is 2.0)
         scale = Gf.Vec3f(size_x / 2.0, size_y / 2.0, size_z / 2.0)
-        mesh_prim.AddScaleOp().Set(scale)
-
-        # Set position
-        mesh_prim.AddTranslateOp().Set(position)
-
-        # Wrap with SingleGeometryPrim
-
-        self.geometry_prim = SingleGeometryPrim(
-            prim_path=self.prim_path,
-            name="ground_cube",
-            collision=True,
-        )
-        # Apply physics material
-        if physics_material is not None:
-            self.geometry_prim.apply_physics_material(physics_material)
-
-        # Set collision approximation to none (use mesh as-is)
-        self.geometry_prim.set_collision_approximation("none")
+        set_pose(mesh_prim.GetPrim(), position, scale=scale)
 
     def _create_plane_ground(self, physics_material: PhysicsMaterial):
-        """Create ground using a Plane (mesh) primitive wrapped with SingleGeometryPrim.
+        """Create a plane mesh.
 
         Args:
             physics_material: Physics material to apply
@@ -374,20 +341,6 @@ class Ground:
             ]
         )
 
-        # Wrap with SingleGeometryPrim
-        self.geometry_prim = SingleGeometryPrim(
-            prim_path=self.prim_path,
-            name="ground_plane",
-            collision=True,
-        )
-
-        # Apply physics material
-        if physics_material is not None:
-            self.geometry_prim.apply_physics_material(physics_material)
-
-        # Set collision approximation to none (use mesh as-is)
-        self.geometry_prim.set_collision_approximation("none")
-
     def initialize(self):
         """Initialize the ground with the configuration after the first scene reload."""
         self.reset()
@@ -417,101 +370,15 @@ class Ground:
         else:
             print(f"Warning: Unknown material type '{material_type}' for ground. Skipping.")
 
-    def _apply_mdl_material(self, material_config: dict):
-        """Apply an MDL material to the ground using create_mdl_material.
+    def _apply_mdl_material(self, material_config):
+        paths = resolve_mdl_paths(material_config.get('mdl_file', ''))
+        if not paths:
+            raise FileNotFoundError(f'No MDL at {material_config}')
+        path = f'{self.prim_path}/Looks/mdl_{Path(paths[0]).stem}'
+        self.current_material_path = mdl_material(path, paths[0])
+        bind_material(self.geometry_prim, self.current_material_path)
 
-        Args:
-            material_config: Material configuration containing:
-                - mdl_path: Path to the MDL file (e.g., "./Assets/Material/Base/Wood.mdl")
-                - mdl_name: Name of the material in the MDL file (optional, defaults to filename)
-        """
-        mdl_file = material_config.get("mdl_file")
-        if not mdl_file:
-            print("Warning: MDL material requires 'mdl_file'. Skipping.")
-            return
-        resolved_mdls = resolve_mdl_paths(mdl_file)
-        if not resolved_mdls:
-            print(f"Warning: No .mdl files found at: {mdl_file}. Skipping.")
-            self._apply_color_material({"color": self.base_color})
-            return
-
-        mdl_path = resolved_mdls[0]
-
-        # Use the resolved .mdl filename stem as the MDL sub-identifier.
-        # This avoids passing a folder name (e.g. "material_1000") as the identifier.
-        mdl_name = Path(mdl_path).stem
-
-        # Create unique material path under ground's Looks
-        looks_path = f"{self.prim_path}/Looks"
-        material_path = find_unique_string_name(
-            initial_name=f"{looks_path}/mdl_material",
-            is_unique_fn=lambda x: not is_prim_path_valid(x),
-        )
-        # Use create_mdl_material to create the material (MDL material is already complete)
-        try:
-            # Create the MDL material
-            create_mdl_material(mdl_path, mdl_name, material_path)
-            self.current_material_path = material_path
-            self.current_visual_material = PreviewSurface(material_path)
-
-            # Bind material to the ground prim
-            omni.kit.commands.execute(
-                "BindMaterialCommand",
-                prim_path=self.prim_path,
-                material_path=material_path,
-                strength=UsdShade.Tokens.strongerThanDescendants,
-            )
-
-            children_prims = prims_utils.get_prim_children(self.geometry_prim.prim)
-            for prim in children_prims:
-                if prim.GetTypeName() in ["Mesh", "GeomSubset"]:
-                    omni.kit.commands.execute(
-                        "BindMaterialCommand",
-                        prim_path=prim.GetPath(),
-                        material_path=material_path,
-                        strength=UsdShade.Tokens.strongerThanDescendants,
-                    )
-
-        except Exception as e:
-            print(f"Warning: Failed to apply MDL material: {e}")
-            # Fallback to color material
-            self._apply_color_material({"color": self.base_color})
-
-    def _apply_color_material(self, material_config: dict):
-        """Apply a color material to the ground using PreviewSurface.
-
-        Args:
-            material_config: Material configuration containing:
-                - color: RGB color as list [r, g, b] (values 0-1)
-        """
-        if self.geometry_prim is None:
-            print("Warning: Geometry prim not initialized. Cannot apply material.")
-            return
-
-        color = material_config.get("color", self.base_color)
-
-        # Create unique material path
-        material_path = find_unique_string_name(
-            initial_name=f"{self.prim_path}/Looks/color_material",
-            is_unique_fn=lambda x: not is_prim_path_valid(x),
-        )
-
-        # Check if material already exists
-        material_prim = get_prim_at_path(material_path)
-
-        if not material_prim:
-            # Create new PreviewSurface material
-            material = PreviewSurface(prim_path=material_path, color=np.array(color, dtype=np.float32))
-        else:
-            # Update existing material color
-            material = PreviewSurface(prim_path=material_path)
-            material.set_color(np.array(color, dtype=np.float32))
-
-        # Bind material using geometry_prim's apply_visual_material (like cuboid.py)
-        try:
-            self.geometry_prim.apply_visual_material(material)
-        except Exception as e:
-            print(f"Warning: Failed to apply visual material: {e}")
-
-        self.current_material_path = material_path
-        self.current_visual_material = material
+    def _apply_color_material(self, material_config):
+        path = f'{self.prim_path}/Looks/color_material'
+        self.current_material_path = color_material(path, material_config.get('color', self.base_color))
+        bind_material(self.geometry_prim, self.current_material_path)

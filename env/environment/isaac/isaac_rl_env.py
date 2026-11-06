@@ -1,63 +1,65 @@
-from collections.abc import Sequence
-
+import torch
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim import PhysxCfg, SimulationCfg
+from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
+from isaaclab_physx.physics import PhysxCfg
 
 from env.environment.isaac.direct_rl_env import CustomDirectRLEnv
 
 
 @configclass
 class IsaacRLEnvCfg(DirectRLEnvCfg):
-    decimation: int = 3
-    episode_length_s: float = 2000 * (1 / 60) * decimation
-    observation_space: int = 0
-    action_space: int = 0
-    state_space: int = 0
-
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1,
-        env_spacing=4.0,
-    )
-    sim: SimulationCfg = SimulationCfg(
-        device="cuda:0",
-        gravity=(0.0, 0.0, -9.81),
-        physx=PhysxCfg(),
-    )
+    decimation = 1
+    episode_length_s = 2000.0
+    observation_space = 0
+    action_space = 0
+    state_space = 0
+    num_rerenders_on_reset = 1
+    scene = InteractiveSceneCfg(num_envs=1, env_spacing=4.0, replicate_physics=False)
+    sim = SimulationCfg(device="cuda:0", gravity=(0.0, 0.0, -9.81), physics=PhysxCfg())
 
 
 class IsaacRLEnv(CustomDirectRLEnv):
-    cfg: IsaacRLEnvCfg
-    env_spacing: float = 4.0
+    """Native environment hooks for task-owned singleton assets and staged controls."""
 
-    def __init__(self, cfg: IsaacRLEnvCfg, render_mode: str | None = None, **kwargs):
-        self.func = kwargs.get("func", None)
-        super().__init__(cfg, render_mode, **kwargs)
+    def __init__(self, cfg, owner, **kwargs):
+        self.owner = owner
+        super().__init__(cfg, **kwargs)
 
     def _setup_scene(self):
-        self.func["_setup_scene"](self)
-        self.scene.clone_environments(copy_from_source=True)
-        self.func["_post_setup_scene"](self)
+        self.owner._setup_scene(self)
 
-    def _get_observations(self):
-        pass
-
-    def _get_dones(self):
-        pass
-
-    def _get_states(self):
-        pass
-
-    def _get_rewards(self):
-        pass
-
-    def _reset_idx(self, env_ids: Sequence[int] | None) -> None:
-        super()._reset_idx(env_ids)
-        self.func["_reset_idx"](self, env_ids)
+    def _pre_physics_step(self, actions):
+        pass  # RobotManager has already staged native actuator commands.
 
     def _apply_action(self):
-        pass
+        self.owner._write_data_to_sim()
 
-    def _pre_physics_step(self, actions, env_ids):
-        pass
+    def _get_observations(self):
+        return {"policy": torch.empty((self.num_envs, 0), device=self.device)}
+
+    def _get_dones(self):
+        # Refresh singleton asset caches before reward/observation consumers read them.
+        self.owner._update_scene(self.step_dt)
+        done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        return done, done
+
+    def _get_rewards(self):
+        return torch.zeros(self.num_envs, device=self.device)
+
+    def _reset_idx(self, env_ids):
+        super()._reset_idx(env_ids)
+        self.owner._reset_idx(self, env_ids)
+
+    def reset_selected(self, env_ids):
+        """Reset selected task instances without advancing physics or other environments."""
+        indices = torch.as_tensor(env_ids, device=self.device, dtype=torch.int32)
+        self._reset_idx(indices)
+        self.scene.write_data_to_sim()
+        self.owner._write_data_to_sim()
+        self.sim.forward()
+        if self.has_rtx_sensors:
+            for _ in range(self.cfg.num_rerenders_on_reset):
+                self.sim.render()
+        return self._get_observations(), self.extras

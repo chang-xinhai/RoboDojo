@@ -8,17 +8,18 @@ import random
 import re
 from typing import Any, List, Literal
 
-from isaacsim.core.utils.prims import is_prim_path_valid
+from isaaclab.sim import get_current_stage
 import numpy as np
 from omegaconf import DictConfig, OmegaConf, open_dict
 from shapely.geometry import box
 import torch
-import transforms3d as t3d
 
 from env.global_configs import *
 from env.seeding import seed_everywhere
 from utils.cluttered_generator import ClutteredGenerator
 from utils.load_file import *
+from utils.pose_schema import decode_layout
+from utils.rotations import rot_matrix_to_quat
 from utils.path import deep_resolve_paths, get_mdl_paths_from_folder, get_usd_paths_from_folder, resolve_path
 from utils.transformer import *
 from utils.transformer import _get_link_matrix_from_usd
@@ -106,7 +107,7 @@ class LayoutManager:
         return self.object_records_by_type[object_type].layout_records_by_env[env_idx]
 
     def set_saved_layout(self, env_idx: int, layout):
-        self.saved_layouts[env_idx] = layout
+        self.saved_layouts[env_idx] = decode_layout(layout)
 
     def clear_object_records(self, env_idx_list=None):
         if env_idx_list is None:
@@ -216,7 +217,7 @@ class LayoutManager:
                         info.get("size", [0, 0, 0, 0])[2] - 0.05 + info.get("pos", [0, 0])[0],
                         info.get("size", [0, 0, 0, 0])[3] - 0.05 + info.get("pos", [0, 0])[1],
                     ),
-                    frame=np.array([0.0, 0.0, info.get("height", 0), 1.0, 0.0, 0.0, 0.0]),
+                    frame=np.array([0.0, 0.0, info.get("height", 0), 0.0, 0.0, 0.0, 1.0]),
                 )
 
     def select_background(self, background_cfg=None):
@@ -476,13 +477,13 @@ class LayoutManager:
         """
         Convert position and quaternion to 4x4 transformation matrix (NumPy array).
         pos: (1,3)
-        rot: (1,4) in (w,x,y,z)
+        rot: (1,4) in (x,y,z,w)
         """
         if isinstance(pos, torch.Tensor):
             pos = pos.cpu().reshape(-1).numpy()
         if isinstance(rot, torch.Tensor):
             rot = rot.cpu().reshape(-1).numpy()
-        w, x, y, z = rot
+        x, y, z, w = rot
         R = np.array(
             [
                 [1 - 2 * (y**2 + z**2), 2 * (x * y - z * w), 2 * (x * z + y * w)],
@@ -532,7 +533,7 @@ class LayoutManager:
                         elif ret == "list":
                             result.append(
                                 list(world_matrix[:3, 3].tolist())
-                                + list(t3d.quaternions.mat2quat(world_matrix[:3, :3]).tolist())
+                                + list(rot_matrix_to_quat(world_matrix[:3, :3]).tolist())
                             )
         return result
 
@@ -573,7 +574,7 @@ class LayoutManager:
                     elif ret == "list":
                         result_list.append(
                             list(world_matrix[:3, 3].tolist())
-                            + list(t3d.quaternions.mat2quat(world_matrix[:3, :3]).tolist())
+                            + list(rot_matrix_to_quat(world_matrix[:3, :3]).tolist())
                         )
         return (result_list, radius)
 
@@ -852,9 +853,9 @@ class LayoutManager:
         Returns:
             Next available integer ID for this category
         """
-        while is_prim_path_valid(
+        while get_current_stage().GetPrimAtPath(
             f"{self.env_roots[env_idx]}/{type}/{cat_name}/{cat_name}_{model_idx}_{self._object_id_counters}"
-        ):
+        ).IsValid():
             self._object_id_counters += 1
         self._object_id_counters += 1
         return self._object_id_counters

@@ -5,6 +5,8 @@ import pickle
 
 import yaml
 
+from utils.pose_schema import decode_object_metadata
+
 
 def load_yaml(file_path):
     if not os.path.exists(file_path):
@@ -47,6 +49,8 @@ def load_object_metadata(modeldir, index):
         print(f"Error decoding JSON from file {p}: {e}")
         return None
 
+    data = decode_object_metadata(data)
+    output["pose_schema"] = data["pose_schema"]
     output["physics"] = data.get("physics", {})
     output["visual"] = data.get("visual", {})
     output["geometry"] = data.get("geometry", {})

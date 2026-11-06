@@ -13,7 +13,7 @@ class TaskEnv(BaseEnv):
         self.scene_config = config.scene
         self.num_envs = self.sim_config.scene.num_envs
         self.env_spacing = self.sim_config.scene.env_spacing
-        self.device = self.sim_config.get("device", "cpu")
+        self.device = self.sim_config.get("device", "cuda:0")
         self.dt = self.sim_config.dt
 
         # RobotManager must be created before BaseEnv.__init__ because it
@@ -36,7 +36,6 @@ class TaskEnv(BaseEnv):
             self.num_envs,
             self.device,
             self.sim_config.scene.env_spacing,
-            use_fabric=self.use_fabric,
             seeds_per_env=self.env_seed_list,
             scene_config=self.scene_config,
             task_config=config.task_env,
@@ -51,25 +50,44 @@ class TaskEnv(BaseEnv):
             self.device,
             seeds_per_env=self.env_seed_list,
         )
-        from env.camera_manager.capture.tiled_capture_manager import TiledCaptureManager
+        from env.camera_manager.capture.capture_manager import CaptureManager
 
-        self.capture_manager = TiledCaptureManager(
+        self.capture_manager = CaptureManager(
             self.num_envs,
             self.capture_config,
             self.camera_manager,
             self.device,
         )
 
+    def launch_sim(self, config):
+        # Finalize robot mounts and camera declarations before the scene clone plan is built.
+        self.interactiveSceneCfg = self.robot_manager._get_SceneCfg(
+            num_envs=self.num_envs, env_spacing=self.env_spacing, replicate_physics=False)
+        for key, camera_cfg in self.camera_manager.scene_configs().items():
+            if hasattr(self.interactiveSceneCfg, key):
+                raise ValueError(f"Duplicate scene entity: {key}")
+            setattr(self.interactiveSceneCfg, key, camera_cfg)
+        super().launch_sim(config)
+
     def _setup_scene(self, sim):
-        self.robot_manager.initialize(sim)
-        super()._setup_scene(sim)
+        self.scene_manager.initialize(sim)
 
     def _post_setup_scene(self, sim):
-        self.scene_manager.initialize(sim)
-        super()._post_setup_scene(sim)
-        self.camera_manager.initialize(sim)
+        self.robot_manager.initialize(sim)
+        self.robot_manager.bind()
+        self.scene_manager.post_init()
+        self.camera_manager.bind(sim.scene)
         self.capture_manager.initialize(sim)
-        self.camera_manager.post_init()
+
+    def _write_data_to_sim(self):
+        self.scene_manager.write_data_to_sim()
+
+    def _update_scene(self, dt):
+        self.scene_manager.update(dt)
+
+    def _reset_idx(self, sim, env_ids):
+        self.robot_manager.reset_state(env_ids)
+        self.scene_manager.reset(env_ids)
 
     def update_seed(self, seed: Any | None = None):
         super().update_seed(seed)
@@ -81,6 +99,9 @@ class TaskEnv(BaseEnv):
             self.camera_manager.update_env_seeds(self.env_seeds)
 
     def reset(self, seed: Any | None = None, options: dict[str, Any] | None = None):
+        # Layout membership may change each episode; native contexts own immutable asset topology.
+        # Preserve the manager's selected layouts while releasing all previous stage handles.
+        self.close()
         super().reset(seed=seed, options=options)
         self.scene_manager.reload_scene()
         self.robot_manager.reset()

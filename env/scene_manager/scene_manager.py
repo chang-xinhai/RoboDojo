@@ -1,21 +1,19 @@
+from __future__ import annotations
 from collections.abc import Sequence
 from copy import deepcopy
 from typing import Any, Dict, List
 
-from isaacsim.core.utils.prims import delete_prim, is_prim_path_valid
-from isaacsim.core.utils.stage import get_current_stage
+from isaaclab.sim.utils import get_current_stage
 from omegaconf import DictConfig
 from pxr import Gf
 import torch
 
-from env.environment.isaac.isaac_rl_env import IsaacRLEnv
 from env.global_configs import *
 from env.scene_manager.layout_manager import LayoutManager
 from env.scene_manager.objects.articulation import ArticulationObject
 from env.scene_manager.objects.background import Background
 from env.scene_manager.objects.dynamic import DynamicObject
 from env.scene_manager.objects.fluid import FluidObject
-from env.scene_manager.objects.garment import GarmentObject
 from env.scene_manager.objects.geometry import GeometryObject
 from env.scene_manager.objects.ground import Ground
 from env.scene_manager.objects.light import Light
@@ -53,8 +51,9 @@ class SceneManager:
         self.device = torch.device(device)
         self.env_spacing = env_spacing
         self.use_fabric = use_fabric
-        self.stage = get_current_stage()
-        self.sim: IsaacRLEnv | None = None
+        self.stage = None
+        self.sim = None
+        self._particle_writeback_settings = None
         self.layout_manager = LayoutManager(
             num_envs=num_envs,
             env_spacing=env_spacing,
@@ -74,7 +73,7 @@ class SceneManager:
         # Object storage structure: [env_id][obj_key] = object
         self._rigid_and_dynamic_objects: List[Dict[str, Any]] = [{} for _ in range(num_envs)]
         self._articulation_objects: List[Dict[str, ArticulationObject]] = [{} for _ in range(num_envs)]
-        self._garment_objects: List[Dict[str, GarmentObject]] = [{} for _ in range(num_envs)]
+        self._garment_objects: List[Dict[str, Any]] = [{} for _ in range(num_envs)]
         self._geometry_objects: List[Dict[str, GeometryObject]] = [{} for _ in range(num_envs)]
         self._fluid_objects: List[Dict[str, FluidObject]] = [{} for _ in range(num_envs)]
 
@@ -89,9 +88,9 @@ class SceneManager:
         # Background (shared across all environments)
         self._background: Background | None = None
         self.background_prim_path = "/World/background"
-        self.pending_initialization = []
         self.spawnable_object_types = [
             "rigid",
+            "dynamic",
             "articulation",
             "garment",
             "geometry",
@@ -110,44 +109,64 @@ class SceneManager:
         if self.layout_manager is not None:
             self.layout_manager.update_env_seeds(seeds)
 
-    def initialize(self, sim: IsaacRLEnv):
-        """Initialize the scene manager."""
+    def initialize(self, sim):
+        """Author the complete episode topology inside the native pre-ready hook."""
         self.sim = sim
-        self.env_origins = self.sim.scene.env_origins
-
+        self.stage = get_current_stage()
+        self.env_origins = sim.scene.env_origins
         self._setup_background()
-        for env_idx in range(self.num_envs):
-            self.config[f"env{env_idx}"] = self.layout_manager.load_saved_layout(env_idx)
-
-        for env_idx in range(self.num_envs):
-            self._set_env_seed(env_idx)
-            if self.device.type == "cuda":
-                # Create dynamic and articulation objects for CUDA
-                self.spawn_scene_objects(
-                    env_id=env_idx,
-                    exclude_types=list(set(self.spawnable_object_types) - {"rigid", "articulation"}),
-                )
-            else:
-                self.spawn_scene_objects(
-                    env_id=env_idx,
-                    exclude_types=list(set(self.spawnable_object_types) - {"articulation"}),
-                )
-
+        for env_id in range(self.num_envs):
+            self._set_env_seed(env_id)
+            self.config[f'env{env_id}'] = self.layout_manager.load_saved_layout(env_id)
+            self.reload_lights(env_id)
+            self.reload_ground(env_id)
+            self.reload_room(env_id)
+            self.reload_table(env_id)
+            self.spawn_scene_objects(env_id)
         self.setup_scene = True
+        self._ready = False
+
+    def _records(self, env_ids=None):
+        ids = range(self.num_envs) if env_ids is None else [int(i) for i in env_ids]
+        for env_id in ids:
+            if self._tables[env_id] is not None:
+                yield self._tables[env_id]
+            for collection in (self._rigid_and_dynamic_objects, self._articulation_objects,
+                               self._geometry_objects, self._fluid_objects, self._garment_objects):
+                yield from collection[env_id].values()
 
     def post_init(self):
-        """Post-initialization logic.
-        Initialize objects created in the initialize() method here.
-        For CUDA devices, initialize rigid and articulation objects here.
-        """
-        for env_id in range(self.num_envs):
-            # Initialize rigid and articulation objects
-            for obj_dict in [
-                self._rigid_and_dynamic_objects[env_id],
-                self._articulation_objects[env_id],
-            ]:
-                for obj in obj_dict.values():
-                    obj.initialize()
+        """Bind domain metadata after Lab has initialized its native assets."""
+        if self._ready:
+            return
+        if any(self._fluid_objects):
+            context = self.sim.sim
+            self._particle_writeback_settings = {
+                name: context.get_setting(name)
+                for name in ('/physics/updateToUsd', '/physics/updateParticlesToUsd')
+            }
+            for name in self._particle_writeback_settings:
+                context.set_setting(name, True)
+        for obj in self._records():
+            obj.post_init()
+        self._ready = True
+
+    def write_data_to_sim(self):
+        for obj in self._records():
+            for asset in getattr(obj, 'native_assets', ()):
+                asset.write_data_to_sim()
+
+    def update(self, dt):
+        for obj in self._records():
+            for asset in getattr(obj, 'native_assets', ()):
+                asset.update(dt)
+
+    def reset(self, env_ids=None):
+        """Reset selected scene records using each singleton's local index zero."""
+        if not getattr(self, '_ready', False):
+            return
+        for obj in self._records(env_ids):
+            obj.apply_saved_pose()
 
     def _set_env_seed(self, env_id: int):
         if self._seeds_per_env is None:
@@ -157,39 +176,15 @@ class SceneManager:
         seed_everywhere(self._seeds_per_env[env_id])
 
     def reload_scene(self):
-        """Reload all environments from saved eval layouts."""
-        print("[INFO] Resetting all environments")
-        self.post_init()
-        env_ids = torch.arange(self.num_envs, device=self.device)
-        self.reload_envs(env_ids)
+        self.reload_envs(range(self.num_envs))
+
+    def reload_envs(self, env_ids):
+        """Stage an existing episode for robot settling; topology never changes here."""
+        if not self._ready:
+            raise RuntimeError('Scene objects must be bound before reset staging')
+        for obj in self._records(env_ids):
+            obj.relocate_offscreen()
         self.setup_scene = False
-
-    def reload_envs(self, env_ids: Sequence[int]):
-        """Reload specified environments from saved eval layouts.
-
-        Args:
-            env_ids: Sequence of environment IDs to reset
-        """
-        if self._background and not self.setup_scene:
-            self.reload_background()
-
-        if not isinstance(env_ids, torch.Tensor):
-            env_ids = torch.tensor(env_ids, device=self.device, dtype=torch.int32)
-
-        for env_id in env_ids:
-            env_id = int(env_id)
-            self._set_env_seed(env_id)
-            self.reload_env_scene(env_id)
-
-        for obj in self.pending_initialization:
-            obj.initialize()
-        self.pending_initialization.clear()
-
-        self.sim.sim_step()
-        for env_idx in range(self.num_envs):
-            self.relocate_stale_objects(env_idx)
-            if self._tables[env_idx] is not None:
-                self._tables[env_idx].relocate_offscreen()
 
     def apply_saved_poses(self, env_idx_list: List[int]):
         """Restore all scene objects to their saved eval-layout poses.
@@ -220,32 +215,6 @@ class SceneManager:
         for _ in range(20):
             self.sim.sim_step(render=False)
 
-    def reload_env_scene(self, env_id: int, object_types: List[str] = None):
-        """Reload scene objects for the specified environment.
-        Resets lights, room, and recreates objects.
-
-        Args:
-            env_id: ID of the environment to reset
-        """
-        if not self.setup_scene:
-            self.config[f"env{env_id}"] = self.layout_manager.load_saved_layout(env_id)
-        self.reload_lights(env_id)
-        self.reload_ground(env_id)
-
-        self.reload_room(env_id)
-        self.reload_table(env_id)
-
-        if self.device.type == "cuda":
-            self.relocate_stale_objects(env_id, ["rigid", "articulation"])
-            # Clear existing objects (based on exclude_types)
-            self.clear_scene_objects(env_id, exclude_types=["rigid", "articulation"])
-            self.spawn_scene_objects(env_id, exclude_types=["rigid", "articulation"])
-        else:
-            self.relocate_stale_objects(env_id, ["articulation"])
-            # Clear existing objects (based on exclude_types)
-            self.clear_scene_objects(env_id, exclude_types=["articulation"])
-            self.spawn_scene_objects(env_id, exclude_types=["articulation"])
-
     def spawn_category_objects(
         self,
         env_id: int,
@@ -275,7 +244,7 @@ class SceneManager:
                 continue
 
             default_pos = inst_cfg.get("default_pos", (0.0, 0.0, 0.0))
-            default_ori = inst_cfg.get("default_ori", (1.0, 0.0, 0.0, 0.0))
+            default_ori = inst_cfg.get("default_ori", (0.0, 0.0, 0.0, 1.0))
             scale = inst_cfg.get("scale", (1, 1, 1))
 
             obj = self.create_scene_object(
@@ -289,7 +258,6 @@ class SceneManager:
             )
             if obj is not None:
                 self.register_scene_object(inst_name, env_id, obj)
-                self.pending_initialization.append(obj)
 
     def create_scene_object(
         self,
@@ -316,23 +284,6 @@ class SceneManager:
         """
         # Get object type first to check if it should be disabled
         obj_type = inst_cfg.get("physics", {}).get("type", "rigid")
-        # Check if garment is disabled due to cpu+use_fabric combination
-        # Do this BEFORE creating any primitive shapes to avoid creating orphaned primitives
-        if self.device.type == "cpu" and self.use_fabric:
-            if obj_type in ["garment", "articulation"]:
-                print(
-                    f"Warning: {obj_type.capitalize()} objects are disabled when device='cpu' and use_fabric=True. "
-                    f"Skipping object creation at '{prim_path}'."
-                )
-                return None
-        if self.device.type.startswith("cuda"):
-            if obj_type in ["fluid"]:
-                print(
-                    f"Warning: {obj_type.capitalize()} objects are disabled when using CUDA device. "
-                    f"Skipping object creation at '{prim_path}'."
-                )
-                return None
-
         usd_path = None
         # Handle primitive shapes
         if asset_to_spawn in PRIMITIVE_MAP:
@@ -369,7 +320,7 @@ class SceneManager:
             self._rigid_and_dynamic_objects[env_id][obj_key] = obj
         elif isinstance(obj, ArticulationObject):
             self._articulation_objects[env_id][obj_key] = obj
-        elif isinstance(obj, GarmentObject):
+        elif obj.instance_config.get("physics", {}).get("type") == "garment":
             self._garment_objects[env_id][obj_key] = obj
         elif isinstance(obj, GeometryObject):
             self._geometry_objects[env_id][obj_key] = obj
@@ -481,13 +432,12 @@ class SceneManager:
             mdl_name=table_cfg["mdl_name"],
         )
 
-    def delete_fixture_prims(self, env_id: int, types: str):
-        env_root = self.env_roots[env_id]
-        if types not in ["Table", "Room", "Light", "Ground"]:
-            return
-        prim_path = f"{env_root}/{types}"
-        if is_prim_path_valid(prim_path):
-            delete_prim(prim_path)
+    def delete_fixture_prims(self, env_id, types):
+        if getattr(self, '_ready', False):
+            raise RuntimeError('Fixture topology changes require a fresh native environment')
+        path = f'{self.env_roots[env_id]}/{types}'
+        if self.stage.GetPrimAtPath(path):
+            self.stage.RemovePrim(path)
 
     def create_primitive_shape(
         self,
@@ -566,6 +516,8 @@ class SceneManager:
                 **{k: v for k, v in base_args.items()},
             )
         elif obj_type == "garment":
+            from env.scene_manager.objects.garment import GarmentObject
+
             return GarmentObject(
                 env_origin=self.sim.scene.env_origins[env_id],
                 **{k: v for k, v in base_args.items()},
@@ -598,7 +550,7 @@ class SceneManager:
         exclude_types = exclude_types or []
         # Create new objects for this environment
         for physics_type in objects_cfg:
-            if physics_type in ["Light", "Room", "Ground", "Background", "Table"]:
+            if physics_type in ["Light", "Room", "Ground", "Background", "Table", "pose_schema"]:
                 continue
             for cat_name in objects_cfg[physics_type]:
                 if self.is_global_config_key(cat_name):
@@ -606,108 +558,23 @@ class SceneManager:
                 self.spawn_category_objects(env_id, cat_name, objects_cfg[physics_type][cat_name], exclude_types)
 
     def close(self):
-        self.layout_manager.close()
+        """Release records; the native environment owns stage/physics teardown."""
+        if self._particle_writeback_settings is not None:
+            for name, value in self._particle_writeback_settings.items():
+                self.sim.sim.set_setting(name, value)
+            self._particle_writeback_settings = None
         for env_id in range(self.num_envs):
-            self.clear_scene_objects(env_id)
-
+            for collection in (self._rigid_and_dynamic_objects, self._articulation_objects,
+                               self._geometry_objects, self._fluid_objects, self._garment_objects):
+                collection[env_id].clear()
             self._lights[env_id].clear()
             self._rooms[env_id] = None
             self._tables[env_id] = None
             self._grounds[env_id].clear()
-
         self._background = None
-
-    def clear_scene_objects(self, env_id: int, exclude_types: List[str] | None = None):
-        """Clear all existing objects in the specified environment.
-
-        Args:
-            env_id: Environment ID
-            exclude_types: Object types to exclude from clearing
-        """
-        exclude_types = exclude_types or []
-
-        # Determine which object collections to clear based on exclude_types
-        all_collections = [
-            (self._rigid_and_dynamic_objects[env_id], "rigid"),
-            (self._articulation_objects[env_id], "articulation"),
-            (self._garment_objects[env_id], "garment"),
-            (self._geometry_objects[env_id], "geometry"),
-            (self._fluid_objects[env_id], "fluid"),
-        ]
-
-        collections_to_clear = [obj_dict for obj_dict, obj_type in all_collections if obj_type not in exclude_types]
-
-        for obj_dict in collections_to_clear:
-            for obj_key, obj in list(obj_dict.items()):
-                self.delete_scene_object(obj)
-                del obj_dict[obj_key]
-
-    def relocate_stale_objects(self, env_id: int, obj_types: List[str] = None):
-        """Relocate stale scene objects offscreen and clear their velocities without deleting prims.
-
-        Args:
-            env_id: Environment ID
-            obj_types: Object types to relocate offscreen
-        """
-        type_mapping = {
-            "rigid": self._rigid_and_dynamic_objects,
-            "articulation": self._articulation_objects,
-            "geometry": self._geometry_objects,
-        }
-        if obj_types is None:
-            obj_types = type_mapping.keys()
-        for obj_type, obj_collection in type_mapping.items():
-            if obj_type in obj_types and env_id < len(obj_collection):
-                for obj in obj_collection[env_id].values():
-                    obj.relocate_offscreen()
-
-    def delete_scene_object(self, obj: Any):
-        """Delete object based on its type using appropriate method.
-
-        Args:
-            obj: Object instance to delete
-        """
-        if self.device.type == "cuda":
-            if isinstance(obj, GarmentObject):
-                if hasattr(obj, "usd_prim_path") and is_prim_path_valid(obj.usd_prim_path):
-                    delete_prim(obj.usd_prim_path)
-            elif isinstance(obj, FluidObject):
-                if hasattr(obj, "usd_prim_path") and is_prim_path_valid(obj.usd_prim_path):
-                    delete_prim(obj.usd_prim_path)
-                # Only delete inline Fluid containers; keep config-imported containers
-                if (
-                    getattr(obj, "container_owned", False)
-                    and hasattr(obj, "container_prim_path")
-                    and obj.container_prim_path
-                    and is_prim_path_valid(obj.container_prim_path)
-                ):
-                    delete_prim(obj.container_prim_path)
-            elif isinstance(obj, ArticulationObject):
-                obj.relocate_offscreen()
-            else:
-                if hasattr(obj, "prim_path") and is_prim_path_valid(obj.prim_path):
-                    delete_prim(obj.prim_path)
-        else:
-            if isinstance(obj, RigidObject) or isinstance(obj, GeometryObject):
-                obj.destroy()
-            elif isinstance(obj, GarmentObject):
-                if hasattr(obj, "usd_prim_path") and is_prim_path_valid(obj.usd_prim_path):
-                    delete_prim(obj.usd_prim_path)
-            elif isinstance(obj, FluidObject):
-                if hasattr(obj, "usd_prim_path") and is_prim_path_valid(obj.usd_prim_path):
-                    delete_prim(obj.usd_prim_path)
-                if (
-                    getattr(obj, "container_owned", False)
-                    and hasattr(obj, "container_prim_path")
-                    and obj.container_prim_path
-                    and is_prim_path_valid(obj.container_prim_path)
-                ):
-                    delete_prim(obj.container_prim_path)
-            elif isinstance(obj, ArticulationObject):
-                obj.relocate_offscreen()
-            else:
-                if hasattr(obj, "prim_path") and is_prim_path_valid(obj.prim_path):
-                    delete_prim(obj.prim_path)
+        self._ready = False
+        self.sim = None
+        self.stage = None
 
     def is_global_config_key(self, key: str) -> bool:
         """Check if the key is a global configuration key.
@@ -775,13 +642,14 @@ class SceneManager:
         """
         all_collections = {
             "rigid": self._rigid_and_dynamic_objects,
-            "dynamic": self._rigid_and_dynamic_objects,
             "articulation": self._articulation_objects,
             "garment": self._garment_objects,
             "geometry": self._geometry_objects,
             "fluid": self._fluid_objects,
         }
 
+        if object_type == "dynamic":
+            return {"dynamic": self._rigid_and_dynamic_objects}
         if object_type is None:
             return all_collections
         elif object_type in all_collections:

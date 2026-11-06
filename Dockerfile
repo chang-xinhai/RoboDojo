@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# RoboDojo simulator / evaluation image (Ubuntu 22.04 + CUDA 12.8).
+# RoboDojo simulator / evaluation image (Ubuntu 22.04 + CUDA 13.0).
 #
 # Scope: this image contains ONLY the RoboDojo simulation-evaluation side
 # (Isaac Sim, IsaacLab, CuRobo, the RoboDojo Python stack) plus the lightweight
@@ -9,18 +9,24 @@
 # container and is reached over TCP (see docker/README.md).
 #
 # Build:
-#   docker build -t robodojo:cuda12.8 .
+#   See docker/README.md for the required host-derived CUROBO_VERSION build arg.
+#   This target has not been built or GPU-validated for the native migration.
 #
 # Run (Linux host, policy server already listening on the host):
 #   docker run --rm -it --gpus all --network host --ipc host \
 #     -v "$PWD/Assets:/workspace/RoboDojo/Assets:ro" \
 #     -v "$PWD/eval_result:/workspace/RoboDojo/eval_result" \
-#     robodojo:cuda12.8 \
+#     robodojo:cuda13.0 \
 #     bash scripts/robodojo.sh client --task stack_bowls \
 #       --policy-name GR00T_N17 --policy-host 127.0.0.1 --policy-port 9999 --eval-num 1
 
-ARG CUDA_IMAGE=nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04
+ARG CUDA_IMAGE=nvidia/cuda:13.0.2-cudnn-devel-ubuntu22.04@sha256:36c66a3ad4608580cf937f7ec3add9323a610956cfe8c9e2f99ef2ea0c896f01
 FROM ${CUDA_IMAGE}
+
+# Exact setuptools_scm version exported from the clean, pinned host cuRobo source.
+# No fallback: inventing a version would hide the source packaging identity.
+ARG CUROBO_VERSION
+RUN test -n "${CUROBO_VERSION}" || { echo "Pass --build-arg CUROBO_VERSION from the source checkout (docker/README.md)." >&2; exit 1; }
 
 SHELL ["/bin/bash", "-c"]
 
@@ -35,9 +41,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PRIVACY_CONSENT=Y \
     TERM=xterm-256color \
     PIP_USER=0 \
-    PYTHONNOUSERSITE=1 \
-    FORCE_CUDA=1 \
-    TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0+PTX"
+    PYTHONNOUSERSITE=1
 
 # ── Optional China mirrors (build args; defaults = official upstreams) ─────────
 # The image is unchanged for normal builds. On a China network, enable mirrors:
@@ -46,7 +50,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #     --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
 #     --build-arg MINICONDA_URL=https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh \
 #     --build-arg CONDA_CHANNEL_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/anaconda \
-#     -t robodojo:cuda12.8 .
+#     --build-arg CUROBO_VERSION="$CUROBO_VERSION" -t robodojo:cuda13.0 .
 # (docker/smoke_docker.sh sets all of these when ROBODOJO_CN_MIRRORS=1.)
 ARG UBUNTU_MIRROR=""
 ARG PIP_INDEX_URL="https://pypi.org/simple"
@@ -120,7 +124,7 @@ WORKDIR /workspace/RoboDojo
 
 # ── Miniconda + RoboDojo env ─────────────────────────────────────────────────
 # setup_conda() from scripts/install.sh: Miniconda under $HOME/miniconda3 and a
-# Python 3.11 env named `RoboDojo` (the simulator conda env used by all scripts).
+# Python 3.12 env named `RoboDojo` (the simulator conda env used by all scripts).
 RUN wget -q "${MINICONDA_URL}" -O /tmp/miniconda.sh && \
     bash /tmp/miniconda.sh -b -p /root/miniconda3 && \
     rm -f /tmp/miniconda.sh && \
@@ -133,50 +137,20 @@ RUN wget -q "${MINICONDA_URL}" -O /tmp/miniconda.sh && \
     fi && \
     (conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main || true) && \
     (conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r || true) && \
-    conda create -n RoboDojo python=3.11 -y && \
+    conda create -n RoboDojo python=3.12 -y && \
     conda clean -afy
 
 # Run every subsequent build step inside the RoboDojo env.
 SHELL ["conda", "run", "--no-capture-output", "-n", "RoboDojo", "/bin/bash", "-c"]
 
-# ── Base pip dependencies ────────────────────────────────────────────────────
-# setup_base_deps() from scripts/install.sh. requirements.txt is copied on its
-# own so this layer caches independently of the rest of the source tree.
-COPY scripts/requirements.txt /workspace/RoboDojo/scripts/requirements.txt
-RUN python -m pip install --upgrade pip && \
-    python -m pip install -r scripts/requirements.txt && \
-    python -m pip install opencv-python-headless==4.11.0.86 pillow matplotlib "scipy==1.15.3" scikit-learn && \
-    python -m pip install numpy==1.26.0
-
-# ── PyTorch (cu128) + Isaac Sim 5.1 ──────────────────────────────────────────
-# setup_isaacsim() from scripts/install.sh.
-RUN python -m pip install "numpy==1.26.0" "typing_extensions==4.12.2" "filelock==3.13.1" && \
-    python -m pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
-        --index-url https://download.pytorch.org/whl/cu128 && \
-    python -m pip install "isaacsim[all,extscache]==5.1.0" --extra-index-url https://pypi.nvidia.com
-
-# ── IsaacLab + CuRobo (built from the vendored submodules) ───────────────────
-# setup_isaaclab() + setup_curobo() + repin_after_curobo() from
-# scripts/install.sh. The submodules are COPYed in; their `.git` submodule pointer
-# files are stripped later (see below) so we never touch git at build/run time.
-# Only third_party/ is copied here so a source edit does not invalidate these
-# expensive build layers.
+# ── Native simulator dependencies (same installer as the host) ────────────────
+# .dockerignore excludes all .git files/directories before copying. Source
+# version inference for cuRobo uses the verified host value only during install;
+# the final runtime reads its installed distribution metadata.
+COPY scripts/install.sh scripts/requirements.txt /workspace/RoboDojo/scripts/
 COPY third_party/ /workspace/RoboDojo/third_party/
-# `--install none` installs all core IsaacLab extensions but skips the RL learning
-# frameworks (rl_games/rsl_rl/skrl/sb3). RoboDojo eval does not use them, and
-# rl_games is pulled from git+github (unreachable/timeouts on some networks).
-RUN cd third_party/IsaacLab && ./isaaclab.sh --install none
-RUN cd third_party/curobo && \
-    python -m pip uninstall -y nvidia-curobo curobo 2>/dev/null || true && \
-    python -m pip install -e ".[cu12]" --no-build-isolation
-RUN python -m pip install \
-        "numpy==1.26.0" \
-        "packaging==23.0" \
-        "typing_extensions==4.12.2" \
-        "filelock==3.13.1" \
-        "websockets==12.0" \
-        "scipy==1.15.3" \
-        "warp-lang==1.11.0"
+RUN SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NVIDIA_CUROBO="${CUROBO_VERSION}" \
+    bash scripts/install.sh --from isaaclab
 
 # ── RoboDojo source + XPolicyLab client/adapter code ─────────────────────────
 # Explicit copies (not `COPY .`) so we do not clobber the compiled artifacts
@@ -191,22 +165,11 @@ COPY scripts/ /workspace/RoboDojo/scripts/
 COPY XPolicyLab/ /workspace/RoboDojo/XPolicyLab/
 COPY pyproject.toml README.md LICENSE /workspace/RoboDojo/
 
-# ── Strip broken submodule .git pointers ─────────────────────────────────────
-# Vendored submodules are copied with their `.git` files (a submodule `.git` is a
-# FILE, so `.dockerignore`'s `.git/` directory rule misses it). curobo detects its
-# version via setuptools_scm whenever a `.git` exists, which raises LookupError at
-# import time in-image (no real git repo behind the pointer) and crashes eval.
-# Removing them makes curobo fall back to the installed package version. This is a
-# late, cheap layer so the expensive IsaacLab/curobo build layers stay cached.
-RUN find /workspace/RoboDojo/third_party -name .git -prune -exec rm -rf {} + 2>/dev/null; true
-
 # ── Headless RTX render deps + single Vulkan ICD (late, cheap layers) ─────────
 SHELL ["/bin/bash", "-c"]
 # libXt.so.6 is required by Isaac Sim's MaterialX render libs
-# (libusd_usdBakeMtlx.so, libMaterialXRender*.so). Without it they fail to load at
-# startup ("libXt.so.6: cannot open shared object file"). Its deps libsm6/libice6
-# are already installed above. Kept as a late layer so the expensive
-# IsaacLab/curobo build layers stay cached.
+# (libusd_usdBakeMtlx.so, libMaterialXRender*.so). Its dependencies libsm6/libice6
+# are installed above. Container loading/rendering still requires validation.
 RUN apt-get update && apt-get install -y --no-install-recommends libxt6 \
     && rm -rf /var/lib/apt/lists/*
 # Force a SINGLE Vulkan ICD. This image bakes /usr/share/vulkan/icd.d/nvidia_icd.json
@@ -214,7 +177,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends libxt6 \
 # time; the loader then sees two ICDs for the same GPU ("multiple installable client
 # drivers") and RTX device init wedges on the first rendered frame (tiled cameras
 # hang right after buffer allocation). Pinning the toolkit-injected, driver-matched
-# ICD makes headless RTX rendering start reliably. --gpus with
+# ICD avoids that duplicate-loader path. This retained setup is unvalidated on
+# the new target. --gpus with
 # NVIDIA_DRIVER_CAPABILITIES=all guarantees that path exists at run time.
 ENV VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json \
     VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json

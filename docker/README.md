@@ -1,20 +1,20 @@
 # Run RoboDojo in Docker
 
-> Migration status: the Docker recipe below still targets Isaac Sim 5.1 /
-> Python 3.11 / CUDA 12.8. It has not been migrated or rebuilt for this branch
-> and is not a validation path for the native Sim 6.2 / Lab 3 work. Use the
-> [native installer](../scripts/README.md#simulator-installation) for the new
-> dependency target. Container migration follows the RoboDojo runtime port.
+> Migration status: this recipe now targets Isaac Sim 6.2.0.0 / Isaac Lab
+> 3.0.0, Python 3.12 and CUDA 13.0. It has only received source and shell
+> checks: no image build or container GPU/evaluation run has been performed.
+> Native PhysX/RTX checks on the host do not validate the container. The full
+> RoboDojo runtime migration is still in progress.
 
-This image is the **RoboDojo simulation-evaluation side** — Isaac Sim 5.1,
-IsaacLab, CuRobo, the RoboDojo Python stack, and the lightweight XPolicyLab client
+This image is the **RoboDojo simulation-evaluation side** — Isaac Sim 6.2.0.0,
+Isaac Lab 3.0.0, CuRobo, the RoboDojo Python stack, and the lightweight XPolicyLab client
 used by `src/eval_client`. It contains **no policy, policy dependencies, or
 checkpoints**: your **policy server runs outside the container** and the sim
 client talks to it over the default WebSocket transport (`protocol: ws` in
 `deploy.yml`), so one image can evaluate any policy.
 
-- Base image: `nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04` (Ubuntu 22.04 + CUDA 12.8)
-- Conda env inside the image: `RoboDojo` (Python 3.11)
+- Base image: `nvidia/cuda:13.0.2-cudnn-devel-ubuntu22.04` (Ubuntu 22.04 + CUDA 13.0)
+- Conda env inside the image: `RoboDojo` (Python 3.12)
 - Project root inside the container: `/workspace/RoboDojo`
 
 ```mermaid
@@ -30,7 +30,7 @@ flowchart LR
 
 ## TL;DR
 
-On a machine with an NVIDIA GPU (driver ≥ 570):
+On a machine meeting the [Isaac Sim 6.2 requirements](https://docs.isaacsim.omniverse.nvidia.com/6.2.0/installation/requirements.html):
 
 ```bash
 sudo bash docker/install_docker_nvidia.sh   # one-time: Docker + NVIDIA Container Toolkit
@@ -48,9 +48,10 @@ Everything below explains each step and how to plug in your own policy.
 
 | Need | Details |
 | --- | --- |
-| NVIDIA GPU + driver | Driver `570.x` or newer (required by CUDA 12.8). Check with `nvidia-smi`. |
-| Disk space | The image is very large (~200 GB with all Isaac Sim extensions cached) and the build cache adds more — keep **300 GB+** free. |
-| OS | Linux (tested on Ubuntu 22.04). |
+| NVIDIA GPU + driver | Supported RTX GPU and driver meeting both [Isaac Sim 6.2](https://docs.isaacsim.omniverse.nvidia.com/6.2.0/installation/requirements.html) and [CUDA 13.0.2](https://docs.nvidia.com/cuda/archive/13.0.2/cuda-toolkit-release-notes/index.html) requirements. Check with `nvidia-smi`. |
+| Disk space | Allow space for the full Isaac Sim extension cache and Docker build layers. This image target has not been measured. |
+| OS | Linux; image base is Ubuntu 22.04. This container target is untested. |
+| Build metadata | A clean Git checkout with initialized pinned submodules, plus a host Python 3.12 env providing `setuptools_scm` (the native `RoboDojo` env suffices). This is used only to derive cuRobo’s true source version. |
 | Assets | The RoboDojo `Assets/` directory on the host (downloaded by `scripts/init_assets.sh`); it is mounted at run time, not baked into the image. |
 
 ## 2. Install Docker + the NVIDIA Container Toolkit
@@ -68,7 +69,7 @@ newgrp docker      # or log out and back in
 Verify the GPU is visible inside a container:
 
 ```bash
-docker run --rm --gpus all nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:13.0.2-cudnn-devel-ubuntu22.04 nvidia-smi
 ```
 
 You should see your GPU listed. If not, see [Troubleshooting](#6-troubleshooting).
@@ -80,25 +81,48 @@ You should see your GPU listed. If not, see [Troubleshooting](#6-troubleshooting
 
 ## 3. Build the image
 
-From the repository root:
+From the repository root, initialize the recorded source revisions and export
+cuRobo's version from its clean checkout. Keep the metadata command's failure
+visible; do not substitute an arbitrary version:
 
 ```bash
-docker build -t robodojo:cuda12.8 .
+git submodule update --init -- third_party/IsaacLab third_party/curobo XPolicyLab &&
+test -z "$(git -C third_party/curobo status --porcelain)" &&
+test "$(git -C third_party/curobo rev-parse --is-shallow-repository)" = false &&
+CUROBO_VERSION="$(conda run --no-capture-output -n "${ROBODOJO_SIM_ENV:-RoboDojo}" python -c '
+from pathlib import Path
+import tomllib
+from setuptools_scm import get_version
+root = Path("third_party/curobo")
+config = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["setuptools_scm"]
+print(get_version(root=root, **config))
+')" && docker build --build-arg "CUROBO_VERSION=$CUROBO_VERSION" -t robodojo:cuda13.0 .
 ```
 
-- The **first build takes ~1 hour** (it downloads Isaac Sim and compiles CuRobo's
-  CUDA kernels). Later builds reuse the layer cache and are fast.
-- Headless RTX rendering works out of the box — the required libraries and a
-  single Vulkan ICD are baked in (see [Appendix A](#appendix-a-configuration-reference)).
-- `smoke_docker.sh run` (step 4) builds the image for you, so you can skip this
-  step if you go straight there.
+The Dockerfile uses the same `scripts/install.sh --from isaaclab` path as the
+host. Lab's lock owns the runtime dependencies, with the installer's documented
+NumPy/Numba compatibility bound. No optional policy environments are installed.
+The CUDA base uses a verified multi-architecture manifest digest (this does
+not certify RoboDojo support on every architecture); overriding
+`CUDA_IMAGE` changes that provenance.
 
-> **China networks:** `smoke_docker.sh` passes the right mirror `--build-arg`s
-> automatically. For a manual build, see [Appendix B](#appendix-b-china-networks).
+`CUROBO_VERSION` is required and has no default. It is passed through the
+[standard package-specific setuptools-scm build variable](https://setuptools-scm.readthedocs.io/v9.2.1/usage/#with-dockerpodman)
+only for installation. All `.git` files and directories are excluded from the
+build context; the runtime reads cuRobo's installed package metadata. Git
+configuration, remotes and credentials are not copied. A source archive without
+Git history needs the corresponding trusted source-derived version supplied by
+its producer.
+
+The first build downloads the simulator dependency stack; its duration and size
+have not been measured for this target. The existing libXt and single Vulkan
+ICD setup is retained and still needs container rendering validation.
+`smoke_docker.sh run` derives and checks the source version automatically before
+building. See [Appendix B](#appendix-b-china-networks) for mirror arguments.
 
 ## 4. Run the demo evaluation
 
-The fastest way to confirm the whole loop works is the bundled end-to-end check:
+Once the runtime port is ready, run the bundled end-to-end container check:
 
 ```bash
 bash docker/smoke_docker.sh run
@@ -145,7 +169,7 @@ docker run --rm -it \
   -v "$HOME/.cache/warp:/root/.cache/warp" \
   -v "$HOME/.local/share/ov:/root/.local/share/ov" \
   -v "$HOME/.cache/ov:/root/.cache/ov" \
-  robodojo:cuda12.8 \
+  robodojo:cuda13.0 \
   bash scripts/robodojo.sh client \
     --task stack_bowls \
     --policy-name GR00T_N17 \
@@ -202,9 +226,9 @@ caches (step 5) so both are reused. `smoke_docker.sh` does this automatically.
 `Assets/` a second time at its original host path (step 5), both read-only.
 `smoke_docker.sh` does this automatically.
 
-**Tiled cameras hang on the first rendered frame.** Already fixed in the image
-(see [Appendix A](#appendix-a-configuration-reference)); make sure you run with
-`--gpus all`.
+**Cameras hang on the first rendered frame.** Check GPU visibility, driver
+compatibility and the Vulkan ICD setup in [Appendix A](#appendix-a-configuration-reference).
+The retained loader configuration has not been validated for this image target.
 
 ## Appendix A: Configuration reference
 
@@ -212,7 +236,7 @@ caches (step 5) so both are reused. `smoke_docker.sh` does this automatically.
 
 | Env | Effect |
 | --- | --- |
-| `ROBODOJO_SKIP_BUILD=1` | Reuse the existing image (skip the ~1 h build) — fast iteration. |
+| `ROBODOJO_SKIP_BUILD=1` | Reuse an existing image; ensure it was built from the intended source target. |
 | `ROBODOJO_CN_MIRRORS=1/0` | Force China build mirrors on/off (default `auto`). |
 | `ROBODOJO_SMOKE_TASK`, `ROBODOJO_SMOKE_PORT`, `ROBODOJO_SMOKE_POLICY`, … | Override task/port/policy/etc. (see the script header). |
 
@@ -229,25 +253,33 @@ caches (step 5) so both are reused. `smoke_docker.sh` does this automatically.
 **GPU selection.** `--gpus all` exposes every GPU; pin one with
 `--gpus '"device=0"'`. Choose the Isaac Sim device with `--env-gpu ID`.
 
-**Headless RTX (already handled).** Tasks render tiled cameras through Isaac Sim's
-RTX path. The image bakes in `libxt6` (needed by Isaac Sim's MaterialX render
-libs) and pins a **single Vulkan ICD** via `ENV VK_ICD_FILENAMES` /
+**Headless RTX configuration.** Tasks render through Isaac Sim’s RTX path.
+The image bakes in `libxt6` (needed by Isaac Sim's MaterialX render libs) and pins a **single Vulkan ICD** via `ENV VK_ICD_FILENAMES` /
 `VK_DRIVER_FILES` (the toolkit also injects one at run time; two ICDs for the same
-GPU wedge RTX init on the first frame). This requires `--gpus all` and
+GPU can conflict during RTX initialization). This setup still requires container
+validation. It requires `--gpus all` and
 `NVIDIA_DRIVER_CAPABILITIES=all` (set by default).
 
-**Build args.** `CUDA_IMAGE` (base image), plus the China mirrors `UBUNTU_MIRROR`,
+**Build args.** Required `CUROBO_VERSION` (exported above), `CUDA_IMAGE` (base
+image), plus the China mirrors `UBUNTU_MIRROR`,
 `PIP_INDEX_URL`, `MINICONDA_URL`, `CONDA_CHANNEL_MIRROR` (see the `Dockerfile`
 header and [Appendix B](#appendix-b-china-networks)).
 
-**Validate the image without a policy server**
+**Structural checks inside the image**
 
 ```bash
-docker run --rm --gpus all --network host --ipc host \
+docker run --rm \
   -v "$PWD/Assets:/workspace/RoboDojo/Assets:ro" \
-  robodojo:cuda12.8 \
-  bash scripts/robodojo.sh doctor --skip-policy
+  robodojo:cuda13.0 \
+  bash scripts/robodojo.sh doctor --skip-policy --skip-isaac
 ```
+
+This deliberately skips runtime certification. The full doctor verifies Git
+source identities and therefore fails those checks in this Git-free image;
+do not treat its exit status as a container pass or weaken the checks. Run the
+full doctor in the host Git checkout for source provenance. Container runtime
+validation requires a successful GPU/render/evaluation run such as the smoke
+procedure above, which has not yet been performed for this target.
 
 ## Appendix B: China networks
 
@@ -259,13 +291,15 @@ Everything auto-detects a restricted network; these are the manual knobs.
 `USE_CN_MIRRORS=0`.
 
 **Image build** — `smoke_docker.sh` sets the mirror build-args when it detects (or
-is told, via `ROBODOJO_CN_MIRRORS=1`) a China network. For a manual `docker build`:
+is told, via `ROBODOJO_CN_MIRRORS=1`) a China network. After deriving
+`CUROBO_VERSION` in step 3, a manual build can use:
 
 ```bash
 docker build \
+  --build-arg "CUROBO_VERSION=$CUROBO_VERSION" \
   --build-arg UBUNTU_MIRROR=mirrors.tuna.tsinghua.edu.cn \
   --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
   --build-arg MINICONDA_URL=https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh \
   --build-arg CONDA_CHANNEL_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/anaconda \
-  -t robodojo:cuda12.8 .
+  -t robodojo:cuda13.0 .
 ```

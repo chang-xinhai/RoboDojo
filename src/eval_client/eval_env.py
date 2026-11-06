@@ -1,14 +1,11 @@
 from copy import deepcopy
 from datetime import datetime
 import importlib
-import inspect
 import json
 import os
 
 from client_server.ws.model_client import WsModelClient
 import numpy as np
-import transforms3d as t3d
-import websockets
 
 from env.global_configs import *
 from env.global_configs import BENCHMARK
@@ -16,28 +13,31 @@ from env.observation_manager.obs_manager import ObsManager
 from env.seed_manager.seed_manager import SeedManager
 from utils.cluttered_generator import UnStableError
 from utils.pipeline_utils import get_robot_action_dim_info
+from utils.rotations import quat_to_rot_matrix, quat_wxyz_to_xyzw, quat_xyzw_to_wxyz
 from utils.save_file import VideoStreamWriter, format_video_saved_message, save_json
 
 
-def _patch_websockets_proxy_compat():
-    # Isaac Sim may load an older bundled websockets package that does not
-    # accept the proxy kwarg used by XPolicyLab's websocket client.
-    connect = websockets.connect
-    if getattr(connect, "_robodojo_proxy_compat", False):
-        return
+def _policy_observation(observation, quaternion_order):
+    """Adapt native XYZW observations to the declared policy checkpoint contract.
 
-    try:
-        if "proxy" in inspect.signature(connect).parameters:
-            return
-    except (TypeError, ValueError):
-        pass
-
-    def connect_without_proxy(*args, proxy=None, **kwargs):
-        _ = proxy
-        return connect(*args, **kwargs)
-
-    connect_without_proxy._robodojo_proxy_compat = True
-    websockets.connect = connect_without_proxy
+    Existing XPolicyLab policies use RoboDojo v1 WXYZ poses and OpenGL camera
+    extrinsics. Native v2 uses XYZW and optical ROS camera-to-world matrices.
+    """
+    if quaternion_order == "wxyz":
+        for section in ("state", "action"):
+            for key, value in observation.get(section, {}).items():
+                if key.endswith(("ee_pose", "tcp_pose")):
+                    pose = np.asarray(value)
+                    if pose.shape != (7,):
+                        raise ValueError(f"Expected a 7D pose for {key}, got {pose.shape}")
+                    observation[section][key] = np.concatenate((pose[:3], quat_xyzw_to_wxyz(pose[3:])))
+        for camera in observation.get("vision", {}).values():
+            if "extrinsic_matrix" in camera:
+                camera["extrinsic_matrix"] = np.asarray(camera["extrinsic_matrix"]) @ np.diag([1, -1, -1, 1])
+        observation["data_format_version"] = "v1.0"
+        observation["additional_info"]["camera_extrinsic_convention"] = "opengl_to_world"
+    observation["additional_info"]["quaternion_order"] = quaternion_order
+    return observation
 
 
 def create_eval_env(config, app, resume_state=None, **kwargs):
@@ -175,12 +175,14 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             )
 
             self.deploy_cfg = config.deploy_cfg
+            # Existing policy adapters/checkpoints retain their v1 pose contract.
+            self.policy_quaternion_order = self.deploy_cfg.get("quaternion_order", "wxyz")
+            if self.policy_quaternion_order not in ("wxyz", "xyzw"):
+                raise ValueError("deploy quaternion_order must be 'wxyz' or 'xyzw'")
             self.port = self.deploy_cfg.get("port", None)
             if self.port is None:
                 raise ValueError("Port must be specified in deploy_cfg for the policy server!")
             self.host = self.deploy_cfg.get("host", "localhost")
-            _patch_websockets_proxy_compat()
-
             policy_server_url = self.deploy_cfg.get("policy_server_url") or f"ws://{self.host}:{self.port}"
             evaluation_id = self.deploy_cfg.get("evaluation_id", self.run_id)
             trial_id = self.deploy_cfg.get("trial_id", f"{self.task_name}-{self.run_id}")
@@ -279,7 +281,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             for env_idx in env_idx_list:
                 if not self.end_flag[env_idx] or last_frame:
                     self._stream_vision(env_idx, data[env_idx])
-                env_data = deepcopy(data[env_idx])
+                env_data = _policy_observation(deepcopy(data[env_idx]), self.policy_quaternion_order)
                 env_data["env_idx"] = env_idx
                 data_list.append(env_data)
             return data_list
@@ -342,7 +344,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 key_name = self.robot_manager.process_name(robot.arm_name)
                 if key_name in action.keys() and "joint" not in action_type:
                     action_type.append("joint")
-                key_name = f"{robot.arm_name.split('_')[0]}_ee_pose"
+                key_name = "ee_pose" if self.robot_manager.target_arm_nums == 1 else f"{robot.arm_name.split('_')[0]}_ee_pose"
                 if key_name in action.keys() and "ee" not in action_type:
                     action_type.append("ee")
             if len(action_type) == 0:
@@ -409,9 +411,11 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                         if robot.type != "target":
                             continue
                         name = robot.arm_name.split("_")[0]
-                        key_name = f"{name}_ee_pose"
+                        key_name = "ee_pose" if self.robot_manager.target_arm_nums == 1 else f"{name}_ee_pose"
                         obs_name = self.robot_manager.process_name(robot.arm_name)
-                        target_pose = action[key_name]
+                        target_pose = np.asarray(action[key_name])
+                        if self.policy_quaternion_order == "wxyz":
+                            target_pose = np.concatenate((target_pose[:3], quat_wxyz_to_xyzw(target_pose[3:])))
                         ik_result = self.robot_manager.solve_ik(
                             target_pose=target_pose,
                             env_idx=env_idx,
@@ -755,7 +759,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                         bad.add(env_idx)
                         continue
                     try:
-                        rot_3x3 = t3d.quaternions.quat2mat(ee_pose[-4:]) @ robot.delta_matrix
+                        rot_3x3 = quat_to_rot_matrix(ee_pose[-4:]) @ robot.delta_matrix
                     except Exception:
                         bad.add(env_idx)
                         continue

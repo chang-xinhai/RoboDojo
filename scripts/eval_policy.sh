@@ -120,16 +120,6 @@ echo "[INFO] num_envs        = ${num_envs}"
 
 extra_args=()
 
-KIT_ENABLE_EXTS=(
-  "isaacsim.replicator.behavior"
-  "isaacsim.sensors.camera"
-)
-
-KIT_ARGS=""
-for ext in "${KIT_ENABLE_EXTS[@]}"; do
-  KIT_ARGS+=" --enable ${ext}"
-done
-
 # Generated once per eval invocation. Carries the same identity through
 # os.execv inside main.py and bash-level retries below. Append $$ to
 # defuse same-second collisions when the same task/config is launched
@@ -148,7 +138,6 @@ while : ; do
     --env_cfg_type "$env_cfg_type" \
     --num_envs "$num_envs" \
     --enable_cameras \
-    --kit_args "$KIT_ARGS" \
     --device_id "$device_id" \
     --policy_name "$policy_name" \
     --port "$port" \

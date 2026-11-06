@@ -14,8 +14,8 @@
 #   bash docker/smoke_docker.sh monitor    # attach a live view to the latest run
 #   bash docker/smoke_docker.sh clean      # stop leftover server, prune smoke logs
 #
-# Everything is overridable via env (defaults chosen to match the verified run):
-#   ROBODOJO_IMAGE=robodojo:cuda12.8  ROBODOJO_SMOKE_TASK=stack_bowls
+# Everything is overridable via env (defaults target the unbuilt native Sim 6.2 image):
+#   ROBODOJO_IMAGE=robodojo:cuda13.0  ROBODOJO_SMOKE_TASK=stack_bowls
 #   ROBODOJO_SMOKE_POLICY=demo_policy ROBODOJO_SMOKE_PORT=6060
 #   ROBODOJO_SMOKE_ENV_CFG=arx_x5     ROBODOJO_SMOKE_ACTION_TYPE=joint
 #   ROBODOJO_SMOKE_EVAL_NUM=1         ROBODOJO_CONDA_ENV=RoboDojo
@@ -26,15 +26,15 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="${ROOT_DIR}/docker/smoke_logs"
 mkdir -p "${LOG_DIR}"
 
-IMAGE="${ROBODOJO_IMAGE:-robodojo:cuda12.8}"
+IMAGE="${ROBODOJO_IMAGE:-robodojo:cuda13.0}"
 TASK="${ROBODOJO_SMOKE_TASK:-stack_bowls}"
 POLICY="${ROBODOJO_SMOKE_POLICY:-demo_policy}"
 PORT="${ROBODOJO_SMOKE_PORT:-6060}"
 ENV_CFG="${ROBODOJO_SMOKE_ENV_CFG:-arx_x5}"
 ACTION_TYPE="${ROBODOJO_SMOKE_ACTION_TYPE:-joint}"
 EVAL_NUM="${ROBODOJO_SMOKE_EVAL_NUM:-1}"
-CONDA_ENV="${ROBODOJO_CONDA_ENV:-RoboDojo}"
-CUDA_BASE_IMAGE="${ROBODOJO_CUDA_BASE_IMAGE:-nvidia/cuda:12.8.1-base-ubuntu22.04}"
+CONDA_ENV="${ROBODOJO_CONDA_ENV:-${ROBODOJO_SIM_ENV:-RoboDojo}}"
+CUDA_BASE_IMAGE="${ROBODOJO_CUDA_BASE_IMAGE:-nvidia/cuda:13.0.2-base-ubuntu22.04@sha256:21a04d376f3a29c7cf7773bbe08e8ad45bf6711bd82e05b71cb1cb67004b0921}"
 
 # ── China mirror build args (resolved at run time; ROBODOJO_CN_MIRRORS=1/0) ───
 CN_MIRRORS=""
@@ -56,6 +56,30 @@ resolve_build_args() {
             --build-arg "CONDA_CHANNEL_MIRROR=${ROBODOJO_CONDA_CHANNEL_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/anaconda}"
         )
     fi
+}
+
+# The standard setuptools_scm build override carries the real source-derived
+# version into a Git-free image. Never read a possibly stale installed version.
+resolve_curobo_version() {
+    local expected actual version
+    expected="$(git -C "${ROOT_DIR}" rev-parse HEAD:third_party/curobo)" || return 1
+    actual="$(git -C "${ROOT_DIR}/third_party/curobo" rev-parse HEAD)" || return 1
+    [[ "${actual}" == "${expected}" ]] || { echo "cuRobo checkout differs from its gitlink" >&2; return 1; }
+    [[ -z "$(git -C "${ROOT_DIR}/third_party/curobo" status --porcelain)" ]] \
+        || { echo "cuRobo source must be clean before packaging" >&2; return 1; }
+    [[ "$(git -C "${ROOT_DIR}/third_party/curobo" rev-parse --is-shallow-repository)" == false ]] \
+        || { echo "cuRobo source needs full history for its SCM version" >&2; return 1; }
+    version="$(conda run --no-capture-output -n "${CONDA_ENV}" python -c '
+from pathlib import Path
+import sys
+import tomllib
+from setuptools_scm import get_version
+root = Path(sys.argv[1])
+config = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["setuptools_scm"]
+print(get_version(root=root, **config))
+' "${ROOT_DIR}/third_party/curobo")" || return 1
+    [[ -n "${version}" ]] || return 1
+    BUILD_ARGS+=(--build-arg "CUROBO_VERSION=${version}")
 }
 
 # ── tiny helpers ──────────────────────────────────────────────────────────────
@@ -119,7 +143,7 @@ phase_gpu() {
 
 phase_build() {
     phase build "${BUILD_LOG}"
-    # Iterate on the runtime path without paying for the ~1h image build: reuse an
+    # Iterate on the runtime path without repeating the dependency build: reuse an
     # existing image when ROBODOJO_SKIP_BUILD=1. Never skips silently if missing.
     if [[ "${ROBODOJO_SKIP_BUILD:-0}" == "1" ]]; then
         if dk image inspect "${IMAGE}" >/dev/null 2>&1; then
@@ -128,6 +152,7 @@ phase_build() {
         fi
         log "ROBODOJO_SKIP_BUILD=1 but ${IMAGE} not found — building anyway"
     fi
+    resolve_curobo_version || fail build "Cannot derive the clean pinned cuRobo source version; check conda env ${CONDA_ENV}."
     log "building ${IMAGE} (cn_mirrors=${CN_MIRRORS}; this is the slow one; tail ${BUILD_LOG})"
     dk build "${BUILD_ARGS[@]}" -t "${IMAGE}" -f "${ROOT_DIR}/Dockerfile" "${ROOT_DIR}" >"${BUILD_LOG}" 2>&1
     local rc=$?
@@ -210,8 +235,8 @@ phase_eval() {
     [[ "${ROOT_DIR}/Assets" != "/workspace/RoboDojo/Assets" ]] \
         && assets_mounts+=( -v "${ROOT_DIR}/Assets:${ROOT_DIR}/Assets:ro" )
 
-    # Headless RTX rendering (single Vulkan ICD + libXt.so.6) is baked into the
-    # image (Dockerfile), so nothing extra is needed here at run time.
+    # The image retains single-ICD/libXt setup; a completed run validates the
+    # new container target, which has not yet been exercised during migration.
     dk run --rm --gpus all --network host --ipc host \
         -e ROBODOJO_MAX_BASH_RETRIES=2 \
         "${cache_mounts[@]}" \

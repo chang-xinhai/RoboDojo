@@ -1,6 +1,6 @@
 import math
 
-import isaacsim.core.utils.stage as stage_utils
+import isaaclab.sim.utils as stage_utils
 import omni.kit.commands
 from omni.physx.scripts import physicsUtils
 from pxr import Gf, UsdGeom

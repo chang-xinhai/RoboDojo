@@ -1,6 +1,7 @@
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 import isaaclab.sim as sim_utils
+from isaaclab_physx.sim.schemas import PhysxArticulationCfg, PhysxRigidBodyCfg
 
 from env.global_configs import ROBOTS_PATH
 
@@ -10,15 +11,15 @@ def get_robot_config():
         spawn=sim_utils.UsdFileCfg(
             usd_path=f"{ROBOTS_PATH}/franka/Franka.usd",
             activate_contact_sensors=False,
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            fix_root_link=True,
+            rigid_props=PhysxRigidBodyCfg(
                 disable_gravity=True,
                 max_depenetration_velocity=5.0,
             ),
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            articulation_props=PhysxArticulationCfg(
                 enabled_self_collisions=True,
                 solver_position_iteration_count=8,
                 solver_velocity_iteration_count=0,
-                fix_root_link=True,
             ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
@@ -34,24 +35,24 @@ def get_robot_config():
                 "panda_finger_joint2": 0.04,
             },
             pos=(0.25, -0.25, 0.0),
-            rot=(0.707, 0, 0, 0.707),
+            rot=(0, 0, 0.7071067811865476, 0.7071067811865476),
         ),
         actuators={
             "panda_shoulder": ImplicitActuatorCfg(
                 joint_names_expr=["panda_joint[1-4]"],
-                effort_limit_sim=87.0,
+                joint_effort_limit=87.0,
                 stiffness=1000.0,
                 damping=200.0,
             ),
             "panda_forearm": ImplicitActuatorCfg(
                 joint_names_expr=["panda_joint[5-7]"],
-                effort_limit_sim=12.0,
+                joint_effort_limit=12.0,
                 stiffness=400.0,
                 damping=80.0,
             ),
             "panda_hand": ImplicitActuatorCfg(
                 joint_names_expr=["panda_finger_joint.*"],
-                effort_limit_sim=200.0,
+                joint_effort_limit=200.0,
                 stiffness=2e3,
                 damping=1e2,
             ),

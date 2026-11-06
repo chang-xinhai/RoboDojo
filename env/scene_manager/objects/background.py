@@ -1,5 +1,5 @@
 import carb
-from isaacsim.core.utils.stage import get_current_stage
+from isaaclab.sim.utils import get_current_stage
 from omegaconf import DictConfig, OmegaConf
 from pxr import Sdf, UsdLux
 
@@ -29,14 +29,6 @@ class Background:
         Create a DomeLight in the USD stage.
         This function defines a new light prim via the API, not from a pre-existing USD file.
         """
-        render_mode = carb.settings.get_settings().get("/rtx/rendermode")
-        rt_subframes = carb.settings.get_settings().get("/omni/replicator/RTSubframes")
-        if render_mode == "RaytracedLighting" and (rt_subframes is None or rt_subframes < 3):
-            carb.log_warn(
-                "`/omni/replicator/RTSubframes` must be > 3 to avoid blank textures while randomizing dome "
-                f"light texture. RTSubframes has been automatically increased from {rt_subframes} to 3"
-            )
-            carb.settings.get_settings().set("/omni/replicator/RTSubframes", 3)
         # Get the current USD stage instance
         stage = get_current_stage()
         # Define a UsdLux.DomeLight prim at the specified path

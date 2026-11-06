@@ -4,18 +4,13 @@ import numpy as np
 from scipy.spatial import ConvexHull
 from scipy.spatial.transform import Rotation as R
 from shapely.geometry import MultiPoint, Polygon
-import transforms3d as t3d
+
+from utils.rotations import quat_multiply, quat_to_rot_matrix
 
 
 def quat_to_mat(q):
-    w, x, y, z = q
-    return np.array(
-        [
-            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
-        ]
-    )
+    """Active rotation matrix for an XYZW quaternion."""
+    return quat_to_rot_matrix(q)
 
 
 def cal_two_axis_angle(v1, v2):
@@ -26,8 +21,8 @@ def cal_two_axis_angle(v1, v2):
 
 
 def pose_to_matrix(pose):
-    """Convert 7D pose (x,y,z,qw,qx,qy,qz) to 4x4 homogeneous transformation matrix"""
-    x, y, z, qw, qx, qy, qz = pose
+    """Convert 7D pose (x,y,z,qx,qy,qz,qw) to 4x4 homogeneous transformation matrix"""
+    x, y, z, qx, qy, qz, qw = pose
     rotation = R.from_quat([qx, qy, qz, qw])
     rot_matrix = rotation.as_matrix()
     matrix = np.eye(4)
@@ -37,14 +32,12 @@ def pose_to_matrix(pose):
 
 
 def matrix_to_pose(matrix):
-    """Convert 4x4 homogeneous matrix back to 7D pose (x,y,z,qw,qx,qy,qz)"""
+    """Convert 4x4 homogeneous matrix back to 7D pose (x,y,z,qx,qy,qz,qw)"""
     position = matrix[0:3, 3]
     rot_matrix = matrix[0:3, 0:3]
     rotation = R.from_matrix(rot_matrix)
     quaternion = rotation.as_quat()
-    qx, qy, qz, qw = quaternion
-    quaternion_wxyz = [qw, qx, qy, qz]
-    pose = np.concatenate([position, quaternion_wxyz])
+    pose = np.concatenate([position, quaternion])
     return pose
 
 
@@ -70,12 +63,12 @@ def calculate_target_pose(real_pose, set_pose, relative_real_pose):
 
 
 def cal_quat_dis(quat1, quat2):
-    """Calculate angular distance between two quaternions (wxyz order)"""
-    qmult = t3d.quaternions.qmult
-    qinv = t3d.quaternions.qinverse
-    qnorm = t3d.quaternions.qnorm
-    delta_quat = qmult(qinv(quat1), quat2)
-    return 2 * np.arccos(np.fabs((delta_quat / qnorm(delta_quat))[0]))
+    """Shortest angular distance (radians) between XYZW rotations, invariant to sign."""
+    q1, q2 = np.asarray(quat1, dtype=float), np.asarray(quat2, dtype=float)
+    norm = np.linalg.norm(q1) * np.linalg.norm(q2)
+    if norm == 0:
+        raise ValueError("Angular distance requires nonzero quaternions")
+    return 2 * np.arccos(np.clip(np.abs(np.dot(q1, q2)) / norm, 0.0, 1.0))
 
 
 def calc_polygon(
@@ -91,7 +84,7 @@ def calc_polygon(
     origin_pose = np.asarray(origin_pose, dtype=float).reshape(7)
     origin_bbox_points = np.asarray(origin_bbox_points, dtype=float).reshape(-1, 3)
 
-    rot_mat = t3d.quaternions.quat2mat(origin_pose[3:])
+    rot_mat = quat_to_mat(origin_pose[3:])
     bbox_points_world = origin_bbox_points @ rot_mat.T + origin_pose[:3]
 
     hull = MultiPoint(bbox_points_world[:, :2]).convex_hull
@@ -101,23 +94,9 @@ def calc_polygon(
     return polygon, z_min, z_max
 
 
-def quat_mul_wxyz(q1, q2):
-    """Quaternion multiplication in wxyz order"""
-    w1, x1, y1, z1 = q1
-    w2, x2, y2, z2 = q2
-    return np.array(
-        [
-            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-        ]
-    )
-
-
-def axis_angle_to_quat_wxyz(axis, angle_deg):
+def axis_angle_to_quat_xyzw(axis, angle_deg):
     """
-    Convert rotation axis and angle (degrees) to quaternion [w, x, y, z]
+    Convert rotation axis and angle (degrees) to quaternion [x, y, z, w]
     axis: rotation axis in world frame, shape (3,)
     angle_deg: rotation angle in degrees
     """
@@ -133,27 +112,27 @@ def axis_angle_to_quat_wxyz(axis, angle_deg):
     w = np.cos(half)
     xyz = axis * np.sin(half)
 
-    return np.array([w, xyz[0], xyz[1], xyz[2]], dtype=np.float64)
+    return np.array([xyz[0], xyz[1], xyz[2], w], dtype=np.float64)
 
 
-def rotate_quat_about_world_axis(q_wxyz, axis_world, angle_deg, normalize=True):
+def rotate_quat_about_world_axis(q_xyzw, axis_world, angle_deg, normalize=True):
     """
-    Rotate quaternion q_wxyz around world axis by angle_deg degrees
+    Rotate quaternion q_xyzw around world axis by angle_deg degrees
 
     Parameters:
-        q_wxyz: current quaternion [w, x, y, z]
+        q_xyzw: current quaternion [x, y, z, w]
         axis_world: rotation axis in world frame [x, y, z]
         angle_deg: rotation angle in degrees
         normalize: whether to normalize output
 
     Return:
-        new quaternion [w, x, y, z]
+        new quaternion [x, y, z, w]
     """
-    q_wxyz = np.asarray(q_wxyz, dtype=np.float64)
-    q_delta = axis_angle_to_quat_wxyz(axis_world, angle_deg)
+    q_xyzw = np.asarray(q_xyzw, dtype=np.float64)
+    q_delta = axis_angle_to_quat_xyzw(axis_world, angle_deg)
 
     # Rotate around world axis => left multiplication
-    q_new = quat_mul_wxyz(q_delta, q_wxyz)
+    q_new = quat_multiply(q_delta, q_xyzw)
 
     if normalize:
         q_new = q_new / np.linalg.norm(q_new)
@@ -295,10 +274,10 @@ def _get_link_matrix_from_usd(usd_path: str, link_name: str) -> np.ndarray:
                     pos[0],
                     pos[1],
                     pos[2],
-                    q.GetReal(),
                     q.GetImaginary()[0],
                     q.GetImaginary()[1],
                     q.GetImaginary()[2],
+                    q.GetReal(),
                 ],
                 dtype=np.float32,
             )

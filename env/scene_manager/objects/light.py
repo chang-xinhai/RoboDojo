@@ -1,11 +1,11 @@
 import random
 
-from isaacsim.core.prims import SingleXFormPrim
-from isaacsim.core.utils.stage import get_current_stage
+from isaaclab.sim.utils import get_current_stage
 from omegaconf import DictConfig
 from pxr import Gf, UsdLux
 
 from utils.rotations import euler_to_quat
+from .scene_object import set_pose
 
 
 class Light:
@@ -51,8 +51,8 @@ class Light:
         else:
             raise NotImplementedError(f"Light type '{self.light_type}' is not supported.")
 
-        # Wrap the created prim with SingleXFormPrim for easier transform manipulation
-        self.xform_prim = SingleXFormPrim(self.prim_path)
+        # Keep the public USD prim for local transform authoring.
+        self.xform_prim = self.light_prim.GetPrim()
 
         return self.light_prim
 
@@ -82,9 +82,9 @@ class Light:
             random.uniform(ori_range[1], ori_range[4]),
             random.uniform(ori_range[2], ori_range[5]),
         ]
-        quat_wxyz = euler_to_quat(euler_ori)
+        quat_xyzw = euler_to_quat(euler_ori)
         # Use set_local_pose with 'translation' to respect the parent environment's transform
-        self.xform_prim.set_local_pose(translation=pos, orientation=quat_wxyz)
+        set_pose(self.xform_prim, pos, quat_xyzw)
 
         # 2. Randomize Color and Color Temperature, allowing them to coexist
 

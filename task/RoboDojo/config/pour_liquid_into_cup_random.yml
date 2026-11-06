@@ -1,3 +1,4 @@
+# Quaternion fields use XYZW (RoboDojo pose schema v2).
 Rigid:
   -
     common:
@@ -6,7 +7,7 @@ Rigid:
       rotate_rand: False
       rotate_deg: 0
       relative_plane: "Table"
-      qpos: [1, 0, 0, 0]
+      qpos: [0, 0, 0, 1]
       margin: 0.04
 
     category:
@@ -26,7 +27,7 @@ Rigid:
       rotate_rand: False
       rotate_deg: 0
       relative_plane: "Table"
-      qpos: [1, 0, 0, 0]
+      qpos: [0, 0, 0, 1]
       margin: 0.04
 
     category:

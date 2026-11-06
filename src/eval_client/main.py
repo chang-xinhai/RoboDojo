@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from isaaclab.app import AppLauncher
+from isaaclab.app import add_launcher_args, launch_simulation
 
 MAX_INPROC_RESTARTS = 3
 
@@ -60,10 +60,15 @@ parser.add_argument(
 
 parser.add_argument("--seed", type=int, required=True, help="policy seed for eval")
 
-AppLauncher.add_app_launcher_args(parser)
+# Preserve RoboDojo's evaluation CLI; these are public Kit launcher configuration inputs.
+parser.add_argument("--headless", action="store_true", help="Run without a viewport.")
+parser.add_argument("--enable_cameras", action="store_true", help="Enable camera outputs (always enabled for evaluation).")
+add_launcher_args(parser)
 args_cli = parser.parse_args()
+if not args_cli.headless and args_cli.visualizer is None:
+    args_cli.visualizer = ["kit"]
 
-# Safe to import before AppLauncher: env is a namespace package (no __init__)
+# Safe to import before launch_simulation: env is a namespace package (no __init__)
 # and GLOBAL_CONFIGS only imports os, so this pulls in no app-dependent code.
 from env.global_configs import BENCHMARK, ROOT_DIR
 
@@ -86,7 +91,7 @@ def _physx_monitor_needed(task_name) -> bool:
     """Enable the PhysX log monitor only for tasks whose Config declares a
     non-empty `Articulation` section (those bodies trigger the PhysX
     "Invalid PhysX transform" / CUDA failures we recover from). Read with a
-    lightweight yaml load before AppLauncher; any failure falls back to
+    lightweight yaml load before launch_simulation; any failure falls back to
     enabled (fail-safe).
     """
     cfg_path = task_registry.task_config_path(os.path.join(ROOT_DIR, "task", BENCHMARK, "config"), task_name)
@@ -111,7 +116,7 @@ if not os.environ.get("ROBODOJO_RUN_ID"):
 enable_monitor = _physx_monitor_needed(args_cli.task_name)
 print(f"[main] PhysX monitor enabled={enable_monitor} (task={args_cli.task_name})")
 if enable_monitor:
-    # Start before AppLauncher so Kit inherits the redirected stdout/stderr fds.
+    # Start before launch_simulation so Kit inherits the redirected stdout/stderr fds.
     from src.eval_client.physx_warning_monitor import (
         PhysXBrokenError,
         PhysXFatalError,
@@ -120,22 +125,10 @@ if enable_monitor:
 
     get_monitor().start(enabled=True)
 
-# Camera frames must not lag physics: make each Kit update wait for its frame.
-from env.camera_manager.capture.render_sync import add_zero_delay_kit_args
-
-add_zero_delay_kit_args(args_cli)
-
-# launch omniverse app
-app_launcher = AppLauncher(args_cli)
-simulation_app = app_launcher.app
-
-from omegaconf import OmegaConf
-
-from env.global_configs import *
-from src.eval_client.eval_env import create_eval_env
-from utils.cluttered_generator import UnStableError
-from utils.load_file import load_yaml
-from utils.pipeline_utils import *
+# The launcher owns Kit for the entire evaluation, including native context rebuilds.
+# Camera configs are constructed after task/robot configuration loading.
+args_cli.enable_cameras = True
+simulation_app = None
 
 BENCHMARK_PATH = os.path.join(ROOT_DIR, "task", BENCHMARK)
 
@@ -225,7 +218,7 @@ def _restart_or_exit(env, simulation_app, fatal_msg):
         f"In-process restart attempt {restart_count}/{MAX_INPROC_RESTARTS}."
     )
     try:
-        simulation_app.close()
+        env.close()
     except Exception:
         pass
     if restart_count <= MAX_INPROC_RESTARTS:
@@ -340,6 +333,8 @@ def main():
         force_add=True,
     )
 
+    if getattr(args_cli, "device_explicit", False):
+        env_cfg.sim.device = args_cli.device
     env_cfg.sim.seed = [0 for _ in range(num_envs)]
     run_id = os.environ["ROBODOJO_RUN_ID"]
     resume_state = _load_resume_manifest(eval_cfg, run_id)
@@ -446,8 +441,20 @@ def main():
     _delete_resume_manifest(env)
     _close_model_client(env)
     env.close()
-    simulation_app.close()
 
 
 if __name__ == "__main__":
-    main()
+    from isaaclab.sim import SimulationCfg
+    from isaaclab_physx.physics import PhysxCfg
+
+    with launch_simulation(SimulationCfg(device=args_cli.device, physics=PhysxCfg()), args_cli):
+        import omni.kit.app
+        from omegaconf import OmegaConf
+        from env.global_configs import *
+        from src.eval_client.eval_env import create_eval_env
+        from utils.cluttered_generator import UnStableError
+        from utils.load_file import load_yaml
+        from utils.pipeline_utils import *
+
+        simulation_app = omni.kit.app.get_app()
+        main()

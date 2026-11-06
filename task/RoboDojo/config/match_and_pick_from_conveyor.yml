@@ -1,3 +1,4 @@
+# Quaternion fields use XYZW (RoboDojo pose schema v2).
 Dynamic:
   -
     common:
@@ -8,7 +9,7 @@ Dynamic:
       rotate_rand: True
       
       relative_plane: "Ground"
-      qpos: [0, 0, 0, 1]
+      qpos: [0, 0, 1, 0]
 
     category:
       - 

@@ -1,10 +1,11 @@
+# Quaternion fields use XYZW (RoboDojo pose schema v2).
 Geometry:
   -
     common:
       xlim: [-0.4, -0.4]
       ylim: [-0.15, -0.15]
       zlim: [0.04, 0.04]
-      qpos: [0.707, 0, 0, 0.707]
+      qpos: [0, 0, 0.707, 0.707]
       rotate_rand: False
       relative_plane: "Table"
 
@@ -23,7 +24,7 @@ Geometry:
       xlim: [0.35, 0.35]
       ylim: [0.25, 0.25]
       zlim: [0.04, 0.04]
-      qpos: [0.707, 0, 0, 0.707]
+      qpos: [0, 0, 0.707, 0.707]
       rotate_rand: False
       relative_plane: "Table"
 

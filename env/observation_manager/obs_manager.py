@@ -11,6 +11,12 @@ class ObsManager:
         "rgb": "color",
         "depth": "depth",
         "distance_to_image_plane": "distance_to_image_plane",
+        "distance_to_camera": "distance_to_camera",
+        "semantic_segmentation": "semantic_segmentation",
+        "instance_segmentation": "instance_segmentation",
+        "instance_id_segmentation_fast": "instance_id_segmentation",
+        "normals": "normals",
+        "motion_vectors": "motion_vectors",
     }
 
     def __init__(
@@ -35,11 +41,10 @@ class ObsManager:
         )
         self.robot_cfg = obs_config.get("robot", {})
         self.collect_freq = self.obs_config.get("collect_freq", 0)
-        # Frames the SDG dispatcher must deliver after the physics step before
-        # images are read. One is exact with the zero-delay Kit settings that
-        # the entrypoints enable; render_sync adds one more if they are absent.
+        # Native Lab cameras share the environment's renderer and physics state.
         self.capture_render_passes = int(self.obs_config.get("capture_render_passes", 1))
-        self.capture_render_max_passes = int(self.obs_config.get("capture_render_max_passes", 16))
+        if self.capture_render_passes < 1:
+            raise ValueError("capture_render_passes must be positive")
         if self.collect_freq > 0:
             self.collect_interval = 1.0 / (self.dt * self.collect_freq)
         else:
@@ -83,14 +88,8 @@ class ObsManager:
 
         Call this instead of a bare ``env.render()`` right before ``get_obs``.
         """
-        from env.camera_manager.capture.render_sync import wait_for_latest_cameras
-
-        wait_for_latest_cameras(
-            self.env,
-            capture_manager=self.capture_manager,
-            min_passes=self.capture_render_passes,
-            max_passes=self.capture_render_max_passes,
-        )
+        if self.capture_manager is not None:
+            self.capture_manager.capture(self.env.render, passes=self.capture_render_passes)
 
     def get_obs(self, env_idx_list=None):  # batch
         if env_idx_list is None:
@@ -101,9 +100,11 @@ class ObsManager:
             obs[env_idx]["vision"] = dict()
             obs[env_idx]["state"] = dict()
             obs[env_idx]["action"] = dict()
-            obs[env_idx]["data_format_version"] = "v1.0"
+            obs[env_idx]["data_format_version"] = "v2.0"
             obs[env_idx]["additional_info"] = {
                 "frequency": self.collect_freq,
+                "quaternion_order": "xyzw",
+                "camera_extrinsic_convention": "optical_ros_to_world",
             }
             obs[env_idx]["instruction"] = self.instruction[env_idx]
         if self.camera_manager is not None and self.capture_manager is not None:
@@ -118,6 +119,10 @@ class ObsManager:
                             if camera_name not in obs[env_idx]["vision"]:
                                 obs[env_idx]["vision"][camera_name] = dict()
                             obs[env_idx]["vision"][camera_name][collect_name] = env_list[idx]["data"]
+                            if env_list[idx].get("info"):
+                                obs[env_idx]["vision"][camera_name].setdefault("annotator_info", {})[
+                                    collect_name
+                                ] = env_list[idx]["info"]
 
                             if annotator_name == "rgb":
                                 obs[env_idx]["vision"][camera_name][collect_name] = obs[env_idx]["vision"][camera_name][

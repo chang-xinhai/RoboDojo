@@ -1,3 +1,4 @@
+# Quaternion fields use XYZW (RoboDojo pose schema v2).
 Dynamic:
   -
     common:
@@ -8,7 +9,7 @@ Dynamic:
       rotate_rand: True
 
       relative_plane: "Ground"
-      qpos: [0, 0, 0, 1]
+      qpos: [0, 0, 1, 0]
 
     category:
       -
@@ -26,7 +27,7 @@ Geometry:
       xlim: [2.08, 2.08]
       ylim: [-0.55, -0.55]
       zlim: [0.05, 0.05]
-      qpos: [0.92, -0.38, 0.0, 0.0]
+      qpos: [-0.38, 0.0, 0.0, 0.92]
       relative_plane: "conveyor"
 
     category:
@@ -45,7 +46,7 @@ Rigid:
       xlim: [1.5, 2.0]
       ylim: [-0.2, -0.1]
       zlim: [-0.1, -0.1]
-      qpos: [0.707, 0, 0, 0.707]
+      qpos: [0, 0, 0.707, 0.707]
       relative_plane: "conveyor"
 
     category:

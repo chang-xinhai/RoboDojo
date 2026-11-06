@@ -68,8 +68,8 @@ def _task_setting(task_info, common_info, key, default):
 
 
 def _enable_teleop_physx_stabilization(sim_cfg):
-    sim_cfg.setdefault("physx", {})
-    sim_cfg["physx"]["enable_stabilization"] = True
+    sim_cfg.setdefault("physics", {})
+    sim_cfg["physics"]["enable_stabilization"] = True
 
 
 def process_config(env_cfg, task_name):

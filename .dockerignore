@@ -3,7 +3,8 @@
 # which keeps the image lean and the build fast. See Dockerfile / docker/README.md.
 
 # ── VCS / IDE / agent / dev scratch ──────────────────────────────────
-.git/
+**/.git
+**/.git/**
 .gitignore
 .gitmodules
 .github/

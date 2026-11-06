@@ -8,7 +8,8 @@ from isaaclab.scene import InteractiveSceneCfg
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 import torch
-import transforms3d as t3d
+from isaaclab.utils import clone, replace
+from utils.rotations import quat_to_rot_matrix, rot_matrix_to_quat, quat_wxyz_to_xyzw
 
 from env.environment.isaac.isaac_rl_env import IsaacRLEnv
 from env.global_configs import ENV_REGEX_NAMESPACE
@@ -89,16 +90,16 @@ class RobotManager:
         for idx, robot in enumerate(self.robot_list):
             key = self.robot_key[idx]
             if robot.robot_type == "arm":
-                target_joints = key.data.default_joint_pos.clone()
-                target_vel = key.data.default_joint_vel.clone()
-                key.set_joint_position_target(target_joints)
-                key.set_joint_velocity_target(target_vel)
+                target_joints = key.data.default_joint_pos.torch.clone()
+                target_vel = key.data.default_joint_vel.torch.clone()
+                key.actuators.target_command.set_position_index(value=target_joints)
+                key.actuators.target_command.set_velocity_index(value=target_vel)
 
     def set_robot_init_state(self, env_idx_list=None):
         if env_idx_list is None:
             env_idx_list = range(self.num_envs)
 
-        state_dict = [{} for _ in range(len(env_idx_list))]
+        state_dict = [{} for _ in range(self.num_envs)]
         for idx, robot in enumerate(self.robot_list):
             if robot.robot_type == "arm":
                 joint_list = self.get_joint(robot=robot)
@@ -145,7 +146,7 @@ class RobotManager:
         key = self.robot_key[self.robot_list.index(robot)]
         entity_link = key.body_names
         env_origin_pos = deepcopy(self.scene.env_origins)
-        link_pose = key.data.body_link_pose_w.clone()
+        link_pose = key.data.body_link_pose_w.torch.clone()
 
         if link_name not in entity_link:
             raise ValueError(f"Link name {link_name} not found in robot {robot.robot_name}")
@@ -158,7 +159,7 @@ class RobotManager:
                     results[env_idx] = np.array(pose.cpu())
                 else:
                     origin_pos = env_origin_pos[env_idx]
-                    # pose: [x, y, z, qw, qx, qy, qz] in world frame
+                    # pose: [x, y, z, qx, qy, qz, qw] in world frame
                     # origin_pos: [x, y, z] of env origin in world frame
                     # relative position = world_pos - origin_pos (origin has translation only)
                     rel_pose = pose.clone()
@@ -176,7 +177,7 @@ class RobotManager:
         results = {}
         key = self.robot_key[self.robot_list.index(robot)]
         arm_indices = robot.arm_joint_indices
-        joint_state = key.data.joint_pos.clone()
+        joint_state = key.data.joint_pos.torch.clone()
         for env_idx in range(self.num_envs):
             if env_idx in env_idx_list:
                 joints = deepcopy(joint_state[env_idx][arm_indices])
@@ -192,7 +193,7 @@ class RobotManager:
         results = {}
         key = self.robot_key[self.robot_list.index(robot)]
         gripper_indices = robot.gripper_joint_indices
-        joint_state = key.data.joint_pos.clone()
+        joint_state = key.data.joint_pos.torch.clone()
         for env_idx in range(self.num_envs):
             if env_idx in env_idx_list:
                 joints = deepcopy(joint_state[env_idx][gripper_indices])
@@ -211,9 +212,9 @@ class RobotManager:
             if env_idx in env_idx_list:
                 ee_pose = real_endpose[env_idx]
                 endpose_arr = np.eye(4)
-                endpose_arr[:3, :3] = t3d.quaternions.quat2mat(ee_pose[-4:]) @ delta_matrix
+                endpose_arr[:3, :3] = quat_to_rot_matrix(ee_pose[-4:]) @ delta_matrix
                 endpose_arr[:3, 3] = ee_pose[:3]
-                res = endpose_arr[:3, 3].tolist() + t3d.quaternions.mat2quat(endpose_arr[:3, :3]).tolist()
+                res = endpose_arr[:3, 3].tolist() + rot_matrix_to_quat(endpose_arr[:3, :3]).tolist()
                 results[env_idx] = res
             else:
                 results[env_idx] = None
@@ -365,6 +366,8 @@ class RobotManager:
             if isinstance(meta_control_list[env_idx], MetaControl):
                 plan_num += 1
                 plan_lst.append(env_idx)
+        if not plan_lst:
+            return
         for robot in self.robot_list:
             if robot.robot_type == "arm":
                 action_dim = len(robot.arm_joint_indices)
@@ -396,10 +399,10 @@ class RobotManager:
                     )
 
                 env_ids = torch.tensor(plan_lst, dtype=torch.int32, device=arm_velocity.device)
-                arm.set_joint_position_target(arm_position, joint_ids=robot.arm_joint_indices, env_ids=env_ids)  # arm
-                arm.set_joint_velocity_target(arm_velocity, joint_ids=robot.arm_joint_indices, env_ids=env_ids)  # arm
-                arm.set_joint_position_target(
-                    gripper_position,
+                arm.actuators.target_command.set_position_index(value=arm_position, joint_ids=robot.arm_joint_indices, env_ids=env_ids)  # arm
+                arm.actuators.target_command.set_velocity_index(value=arm_velocity, joint_ids=robot.arm_joint_indices, env_ids=env_ids)  # arm
+                arm.actuators.target_command.set_position_index(
+                    value=gripper_position,
                     joint_ids=robot.gripper_joint_indices,
                     env_ids=env_ids,
                 )  # gripper
@@ -413,9 +416,9 @@ class RobotManager:
             deepcopy(target_pose_arr[0:3]),
             deepcopy(target_pose_arr[-4:]),
         )
-        gripper_pose_mat = t3d.quaternions.quat2mat(gripper_pose_quat)
+        gripper_pose_mat = quat_to_rot_matrix(gripper_pose_quat)
         gripper_pose_mat = gripper_pose_mat @ inv_delta_matrix
-        gripper_pose_quat = t3d.quaternions.mat2quat(gripper_pose_mat)
+        gripper_pose_quat = rot_matrix_to_quat(gripper_pose_mat)
         return list(gripper_pose_pos) + list(gripper_pose_quat)
 
     def reset(self):
@@ -442,7 +445,8 @@ class RobotManager:
                 target_cfg["pos"] = pos
             ori = camera_cfg.get("ori", None)
             if ori is not None:
-                target_cfg["ori"] = ori
+                # Shared Assets/Robots metadata is historical WXYZ; Euler triples stay degrees.
+                target_cfg["ori"] = quat_wxyz_to_xyzw(ori).tolist() if len(ori) == 4 else ori
             type = camera_cfg.get("type", None)
             if type is not None:
                 target_cfg["type"] = type
@@ -518,11 +522,33 @@ class RobotManager:
         self.sim = sim
         self.scene = sim.scene
 
+    def bind(self):
+        """Resolve names and physics-backed poses after native PHYSICS_READY."""
+        self.robot_key.clear()
+        self._setup_robot_key()
+
+    def reset_state(self, env_ids):
+        """Restore batched native robot states without stepping or changing other environments."""
+        for asset in dict.fromkeys(self.robot_key):
+            pose = asset.data.default_root_pose.torch[env_ids].clone()
+            pose[:, :3] += self.scene.env_origins[env_ids]
+            asset.write_root_link_pose_to_sim_index(root_pose=pose, env_ids=env_ids)
+            velocity = asset.data.default_root_vel.torch[env_ids].clone()
+            asset.write_root_link_velocity_to_sim_index(root_velocity=velocity, env_ids=env_ids)
+            position = asset.data.default_joint_pos.torch[env_ids].clone()
+            joint_velocity = asset.data.default_joint_vel.torch[env_ids].clone()
+            asset.write_joint_position_to_sim_index(position=position, env_ids=env_ids)
+            asset.write_joint_velocity_to_sim_index(velocity=joint_velocity, env_ids=env_ids)
+            asset.actuators.target_command.set_position_index(value=position, env_ids=env_ids)
+            asset.actuators.target_command.set_velocity_index(value=joint_velocity, env_ids=env_ids)
+
     def close(self):
         self.control_manager.reset()
         self.robot_key.clear()
         self.robot_origin_endpose = [dict() for _ in range(self.num_envs)]
         self.robot_init_joint = [dict() for _ in range(self.num_envs)]
+        self.scene = None
+        self.sim = None
 
     def _get_SceneCfg(self, num_envs, env_spacing, replicate_physics=False):
         scene_cfg = InteractiveSceneCfg(
@@ -532,7 +558,7 @@ class RobotManager:
         )
         for idx, robot in enumerate(self.robot_list):
             if self.use_scene_cfg[idx]:
-                setattr(scene_cfg, f"robot{idx}", robot.SceneCfg)
+                setattr(scene_cfg, f"robot{idx}", clone(robot.SceneCfg))
         ensure_usd_path(scene_cfg)
         return scene_cfg
 
@@ -540,7 +566,7 @@ class RobotManager:
         if robot.robot_type == "arm":
             root_pose = deepcopy(robot.entity_origin_pose)
             self.planner[robot.robot_name] = CuroboPlanner(
-                robot_origin_pose=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                robot_origin_pose=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
                 active_joints_name=robot.arm_joints_name,
                 all_joints=robot.arm_joints_name,
                 dt=self.dt,
@@ -612,15 +638,15 @@ class RobotManager:
         # - dual robot: use left_robot.entity_origin_pose
         base_pose = robots[0].entity_origin_pose
         if cfg is not None and "enabled_self_collisions" in cfg:
-            scene_cfg = scene_cfg.replace(
-                spawn=scene_cfg.spawn.replace(
-                    articulation_props=scene_cfg.spawn.articulation_props.replace(
+            scene_cfg = replace(scene_cfg,
+                spawn=replace(scene_cfg.spawn,
+                    articulation_props=replace(scene_cfg.spawn.articulation_props,
                         enabled_self_collisions=cfg["enabled_self_collisions"]
                     )
                 )
             )
 
-        scene_cfg = scene_cfg.replace(
+        scene_cfg = replace(scene_cfg,
             prim_path=f"{ENV_REGEX_NAMESPACE}/robot{idx}",
             init_state=ArticulationCfg.InitialStateCfg(
                 pos=base_pose[:3],

@@ -13,10 +13,10 @@ from curobo.types import (
 )
 import numpy as np
 import torch
-import transforms3d as t3d
 import yaml
 
 from env.global_configs import BATCH_NUM
+from utils.rotations import quat_to_rot_matrix, quat_xyzw_to_wxyz, rot_matrix_to_quat
 from utils.transformer import calculate_target_pose
 
 _curobo_runtime.cuda_graph_reset = True
@@ -145,7 +145,7 @@ class CuroboPlanner:
         pos = torch.as_tensor(target_pose_p, dtype=torch.float32, device=device).reshape(1, 3)
         quat = torch.as_tensor(target_pose_q, dtype=torch.float32, device=device).reshape(1, 4)
         return GoalToolPose.from_poses(
-            {self.ee_link: Pose(position=pos, quaternion=quat)},
+            {self.ee_link: Pose(position=pos, quaternion=quat_xyzw_to_wxyz(quat))},
             ordered_tool_frames=self.tool_frames,
             num_goalset=1,
         )
@@ -281,7 +281,7 @@ class CuroboPlanner:
             poses_list.append(base_target_pose_list)
         poses_tensor = torch.as_tensor(poses_list, dtype=torch.float32, device=self.device_cfg.device)
         goal_tool_poses = GoalToolPose.from_poses(
-            {self.ee_link: Pose(position=poses_tensor[:, :3], quaternion=poses_tensor[:, 3:])},
+            {self.ee_link: Pose(position=poses_tensor[:, :3], quaternion=quat_xyzw_to_wxyz(poses_tensor[:, 3:]))},
             ordered_tool_frames=self.tool_frames,
             num_goalset=1,
         )
@@ -410,16 +410,16 @@ class CuroboPlanner:
     def _trans_from_world_to_base(self, base_pose, target_pose):
         """
         transform target pose from world frame to base frame
-        base_pose: np.array([x, y, z, qw, qx, qy, qz])
-        target_pose: np.array([x, y, z, qw, qx, qy, qz])
+        base_pose: np.array([x, y, z, qx, qy, qz, qw])
+        target_pose: np.array([x, y, z, qx, qy, qz, qw])
         """
         base_p, base_q = base_pose[0:3], base_pose[3:]
         target_p, target_q = target_pose[0:3], target_pose[3:]
         rel_p = target_p - base_p
-        wRb = t3d.quaternions.quat2mat(base_q)
-        wRt = t3d.quaternions.quat2mat(target_q)
+        wRb = quat_to_rot_matrix(base_q)
+        wRt = quat_to_rot_matrix(target_q)
         result_p = wRb.T @ rel_p
-        result_q = t3d.quaternions.mat2quat(wRb.T @ wRt)
+        result_q = rot_matrix_to_quat(wRb.T @ wRt)
         return result_p, result_q
 
     def _build_robot_and_scene_cfg(self, yml_data, table_height):
@@ -485,6 +485,7 @@ class CuroboPlanner:
 
         # Default: 5cm-thick table; pose[2] is the cuboid centre, so the *top*
         # surface sits at table_height when centre = table_height - 0.025.
+        # cuRobo scene dictionaries use external [position, WXYZ] poses.
         scene_model = {
             "cuboid": {
                 "table": {
