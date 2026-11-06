@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 
 from isaaclab.sim.utils import get_current_stage
 from omegaconf import DictConfig
-from pxr import Gf
+from pxr import Gf, PhysxSchema
 import torch
 
 from env.global_configs import *
@@ -123,6 +123,13 @@ class SceneManager:
             self.reload_room(env_id)
             self.reload_table(env_id)
             self.spawn_scene_objects(env_id)
+        garment_count = sum(len(objects) for objects in self._garment_objects)
+        if garment_count:
+            # The official surface-deformable demo reserves 4M contacts. Dense
+            # self-contacting garments overflow the default budget at warmup.
+            scene = self.stage.GetPrimAtPath(sim.sim.cfg.physics_prim_path)
+            capacity = PhysxSchema.PhysxSceneAPI(scene).GetGpuMaxDeformableSurfaceContactsAttr()
+            capacity.Set(max(int(capacity.Get()), garment_count * 4 * 1024 * 1024))
         self.setup_scene = True
         self._ready = False
 

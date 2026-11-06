@@ -72,10 +72,10 @@ installation. Resume with `bash scripts/install.sh --from isaaclab`; set
 `ROBODOJO_SIM_ENV` when using a nondefault environment. Sim and Lab install together from the
 upstream lock; `--from isaacsim` is an alias. See [scripts](scripts/README.md).
 
-Non-cloth tasks use native Lab assets, actuators and cameras with a Lab-owned
-simulation lifecycle. Task definitions and success criteria are retained.
-Cloth tasks await the separate surface-FEM migration and are not supported at
-this stage. Validation uses the installed environment; a passing doctor checks
+Tasks use native Lab assets, actuators and cameras with a Lab-owned simulation
+lifecycle. Task definitions and success criteria are retained. Garments use the
+surface-FEM baseline described below. Validation uses the installed environment;
+a passing doctor checks
 dependencies, while replay and policy runs check simulation behavior. No fresh
 environment installation or Docker build has been validated. The
 [Docker recipe](docker/README.md) targets Sim 6.2, Python 3.12 and CUDA 13 using
@@ -89,6 +89,36 @@ their v1 WXYZ poses and OpenGL extrinsics through the evaluation boundary;
 joint actions and RGB channel order are unchanged. A policy designed for the
 native v2 contract can set `quaternion_order: xyzw` in its deploy configuration.
 Camera intrinsic matrices always describe the actual native projection.
+
+### Cloth physics baseline
+
+`fold_clothes` and `fold_clothes_random` now use PhysX surface FEM through Lab's
+`DeformableObject`. This replaces PBD cloth and establishes a new physical
+baseline; the old spring and particle coefficients are not equivalent FEM
+material parameters. Asset transforms, mesh vertex IDs used by the rewards,
+saved layouts and success conditions are retained. PhysX requires unique mesh
+positions: exact duplicate vertices are merged only in the runtime instance,
+with a mapping back to the original reward vertex IDs. Shared USD assets and
+face-corner appearance data remain unchanged.
+
+The garment baseline explicitly sets density 300 kg/m³, Young's modulus 1 MPa,
+Poisson's ratio 0.3, thickness 0.001 m, static/dynamic friction 0.5, elasticity
+damping 0.05 and bend damping 0.05. These replace Lab's generic surface material
+defaults, including its 0.01 m thickness. Surface stretch, shear and bend stiffness
+overrides remain zero, so PhysX derives them from the modulus and thickness;
+zero does not disable bending resistance. Self-collision is enabled for folding.
+Collider rest/contact offsets are explicitly 0.001/0.003 m; automatic offsets
+produced inflated garments in the same-layout comparison. Other body solver
+settings use current SDK defaults. Cloth scenes reserve at
+least 4,194,304 surface contacts per garment, following the official PhysX
+surface example after the default capacity overflowed on these meshes. This is
+a memory budget, not a material parameter. Native overrides belong
+in `physics.fem_config.material`, `.body`, `.surface` or `.collision`. Collision
+overrides use native PhysX collider settings such as `rest_offset` and
+`contact_offset`; omitted fields retain the garment defaults above.
+The old garment PBD
+configuration and shared cloth/fluid particle-system mode are not supported.
+These values define this migration baseline, not a fit to measured fabric.
 
 ## 🗂️ Repository Structure
 
