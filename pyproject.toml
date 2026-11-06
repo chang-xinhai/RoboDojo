@@ -3,13 +3,13 @@ name = "robodojo"
 version = "0.2.0"
 description = "RoboDojo robot simulation benchmark (eval-only release)"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 license = "MIT"
 authors = [{ name = "RoboDojo Contributors" }]
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py312"
 
 extend-exclude = [
     ".git",

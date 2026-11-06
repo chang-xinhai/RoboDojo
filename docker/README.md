@@ -1,5 +1,11 @@
 # Run RoboDojo in Docker
 
+> Migration status: the Docker recipe below still targets Isaac Sim 5.1 /
+> Python 3.11 / CUDA 12.8. It has not been migrated or rebuilt for this branch
+> and is not a validation path for the native Sim 6.2 / Lab 3 work. Use the
+> [native installer](../scripts/README.md#simulator-installation) for the new
+> dependency target. Container migration follows the RoboDojo runtime port.
+
 This image is the **RoboDojo simulation-evaluation side** — Isaac Sim 5.1,
 IsaacLab, CuRobo, the RoboDojo Python stack, and the lightweight XPolicyLab client
 used by `src/eval_client`. It contains **no policy, policy dependencies, or

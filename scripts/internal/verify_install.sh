@@ -3,12 +3,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${ROOT_DIR}"
 
 policy_dir=""
 env_cfg="arx_x5"
 task_name="stack_bowls"
 ckpt_name=""
-sim_env="RoboDojo"
+sim_env="${ROBODOJO_SIM_ENV:-RoboDojo}"
 policy_env=""
 skip_isaac="false"
 skip_conda="false"
@@ -24,10 +25,10 @@ Options:
   --env-cfg NAME        env_cfg stem to validate (default: arx_x5)
   --task NAME           Task name to validate (default: stack_bowls)
   --ckpt NAME           Optional checkpoint directory under policy checkpoints
-  --sim-env NAME        Simulator conda env for Isaac imports (default: RoboDojo)
+  --sim-env NAME        Simulator env (default: ROBODOJO_SIM_ENV or RoboDojo)
   --policy-env NAME     Optional policy conda env to check
   --summary PATH        Write JSON summary to PATH
-  --skip-isaac          Skip isaacsim/isaaclab import check
+  --skip-isaac          Skip native versions/source paths/dependency checks
   --skip-conda          Skip conda env existence checks
   --skip-policy         Skip policy-dir/deploy/checkpoint checks
   -h, --help            Show this help
@@ -221,18 +222,178 @@ else
 fi
 
 if [[ "${skip_isaac}" == "true" ]]; then
-  record "WARN" "Isaac imports" "skipped by --skip-isaac"
+  record "WARN" "native runtime" "skipped by --skip-isaac; runtime is not verified"
 elif command -v conda >/dev/null 2>&1; then
-  if conda run -n "${sim_env}" python - <<'PY'; then
-import isaacsim  # noqa: F401
-import isaaclab  # noqa: F401
+  # conda run may consume stdin; use -c so an empty Python process cannot pass.
+  native_probe="$(cat <<'PY'
+import importlib
+import importlib.metadata as metadata
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tomllib
+from urllib.parse import unquote, urlparse
+
+root = Path(sys.argv[1]).resolve()
+def report(status, name, message):
+    print(f"{status}\t{name}\t{str(message).replace(chr(10), ' ')}", flush=True)
+
+def check(name, function):
+    try:
+        report("PASS", name, function())
+    except Exception as exc:
+        report("FAIL", name, exc)
+
+def python_version():
+    assert sys.version_info[:2] == (3, 12), f"expected Python 3.12, got {sys.version}"
+    return f"{sys.version.split()[0]}; executable={sys.executable}; prefix={sys.prefix}"
+
+check("sim Python", python_version)
+lab = root / "third_party/IsaacLab"
+project = tomllib.loads((lab / "pyproject.toml").read_text())
+versions = project["tool"]["isaaclab"]["versions"]
+
+def source_identity(relative):
+    path = root / relative
+    actual = subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+    recorded = subprocess.check_output(["git", "-C", str(root), "ls-files", "--stage", "--", relative], text=True)
+    assert recorded.startswith("160000 "), f"missing superproject gitlink: {relative}"
+    expected = recorded.split()[1]
+    assert actual == expected, f"checkout={actual}; recorded gitlink={expected}"
+    return f"{actual}; {path}"
+
+for relative in ("third_party/IsaacLab", "third_party/curobo", "XPolicyLab"):
+    check(f"source {relative}", lambda relative=relative: source_identity(relative))
+
+def lab_release():
+    release = (lab / "VERSION").read_text().strip()
+    assert release == "3.0.0", f"expected Lab source 3.0.0, got {release}"
+    return f"source={release}; distribution metadata={metadata.version('isaaclab')}"
+
+check("Lab release", lab_release)
+
+def distribution_version(name, expected):
+    version = metadata.version(name)
+    assert version.split("+")[0] == expected, f"expected {expected}, got {version}"
+    return f"{version}; {metadata.distribution(name).locate_file('')}"
+
+for name, expected in (("isaacsim", versions["isaacsim"]), ("torch", versions["torch"]),
+                       ("torchvision", versions["torchvision"]), ("warp-lang", versions["warp"])):
+    check(f"version {name}", lambda name=name, expected=expected: distribution_version(name, expected))
+
+def module_path(name, expected):
+    spec = importlib.util.find_spec(name)
+    assert spec is not None and spec.origin, f"module {name} unavailable"
+    actual = Path(spec.origin).resolve()
+    assert actual.is_relative_to(expected.resolve()), f"shadowed module: {actual}; expected under {expected}"
+    return actual
+
+for name, expected in (("isaacsim", Path(sys.prefix)), ("torch", Path(sys.prefix)),
+                       ("numpy", Path(sys.prefix)), ("warp", Path(sys.prefix)),
+                       ("isaaclab", lab / "source/isaaclab"),
+                       ("isaaclab_physx", lab / "source/isaaclab_physx"),
+                       ("curobo", root / "third_party/curobo")):
+    check(f"module {name}", lambda name=name, expected=expected: module_path(name, expected))
+
+def editable(name, expected):
+    data = json.loads(metadata.distribution(name).read_text("direct_url.json") or "{}")
+    assert data.get("dir_info", {}).get("editable"), f"{name} is not an editable source install"
+    url = urlparse(data["url"])
+    assert url.scheme == "file" and Path(unquote(url.path)).resolve() == expected.resolve(), data
+    return data["url"]
+
+check("editable isaaclab", lambda: editable("isaaclab", lab / "source/isaaclab"))
+check("editable curobo", lambda: editable("nvidia-curobo", root / "third_party/curobo"))
+
+def torch_runtime():
+    import torch
+    assert torch.__version__.split("+")[0] == versions["torch"], torch.__version__
+    assert torch.version.cuda == "13.0", f"expected CUDA 13.0 Torch, got {torch.version.cuda}"
+    return f"{torch.__version__}; CUDA build={torch.version.cuda}; {torch.__file__}; GPU execution not tested"
+
+check("loaded Torch", torch_runtime)
+
+def numpy_runtime():
+    import numpy
+    assert int(numpy.__version__.split('.')[0]) == 2, numpy.__version__
+    return f"{numpy.__version__}; {numpy.__file__}"
+
+check("loaded NumPy", numpy_runtime)
+
+def numba_runtime():
+    import numba
+    import numpy
+    # numba's own import guard checks its supported NumPy ABI range.
+    return f"numba={numba.__version__}; NumPy={numpy.__version__}; import guard passed"
+
+check("Numba/NumPy ABI", numba_runtime)
+
+def curobo_imports():
+    from curobo.batch_motion_planner import BatchMotionPlanner, MotionPlannerCfg
+    from curobo.inverse_kinematics import InverseKinematics, InverseKinematicsCfg
+    from curobo.motion_planner import MotionPlanner
+    from curobo.types import ToolPoseCriteria
+    return "planner APIs import; CUDA kernel execution not tested"
+
+check("cuRobo APIs", curobo_imports)
+
+# pip check cannot understand Lab's documented resolver overrides. Report those
+# mismatches explicitly, and fail every unrelated missing/incompatible dependency.
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
+overrides = {canonicalize_name(r.name): r for r in map(Requirement, project["tool"]["uv"]["override-dependencies"])}
+# Only these requester/dependency pairs have been inspected and confirmed as
+# deliberate upstream overrides. A broad name-only waiver would hide e.g. Numba ABI failures.
+known_overrides = {("isaacsim-kernel", "urllib3"), ("isaacsim-core", "fsspec")}
+conflicts = 0
+for dist in metadata.distributions():
+    for raw in dist.requires or ():
+        requirement = Requirement(raw)
+        if requirement.marker and not requirement.marker.evaluate({"extra": ""}):
+            continue
+        try:
+            installed = metadata.version(requirement.name)
+        except metadata.PackageNotFoundError:
+            report("FAIL", "dependency conflict", f"{dist.metadata['Name']} requires {raw}; missing")
+            conflicts += 1
+            continue
+        if requirement.specifier.contains(installed, prereleases=True):
+            continue
+        override = overrides.get(canonicalize_name(requirement.name))
+        pair = (canonicalize_name(dist.metadata["Name"]), canonicalize_name(requirement.name))
+        intentional = pair in known_overrides and override is not None and override.specifier.contains(installed, prereleases=True)
+        report("WARN" if intentional else "FAIL", "upstream override" if intentional else "dependency conflict",
+               f"{dist.metadata['Name']} requires {raw}; installed={installed}" + (f"; Lab override={override}" if intentional else ""))
+        conflicts += not intentional
+if conflicts == 0:
+    report("PASS", "dependency audit", "no conflicts beyond the explicitly reported upstream overrides")
+print("DONE\tnative probe\tfinished", flush=True)
+sys.exit(0)
 PY
-    record "PASS" "Isaac imports" "isaacsim and isaaclab import in ${sim_env}"
+)"
+  native_output="$(mktemp)"
+  if conda run --no-capture-output -n "${sim_env}" python -c "${native_probe}" "${ROOT_DIR}" >"${native_output}" 2>&1; then
+    native_status=0
   else
-    record "FAIL" "Isaac imports" "isaacsim/isaaclab import failed in ${sim_env}"
+    native_status=$?
+  fi
+  native_done="false"
+  while IFS=$'\t' read -r status name message; do
+    case "${status}" in
+      PASS|WARN|FAIL) record "${status}" "${name}" "${message}" ;;
+      DONE) native_done="true" ;;
+      *) printf '%s\n' "${status}${name:+ ${name}}${message:+ ${message}}" ;;
+    esac
+  done <"${native_output}"
+  rm -f "${native_output}"
+  if [[ "${native_done}" != "true" || "${native_status}" != 0 ]]; then
+    record "FAIL" "native runtime" "probe failed/incomplete (exit ${native_status}); see diagnostics above"
   fi
 else
-  record "FAIL" "Isaac imports" "conda unavailable; cannot check ${sim_env}"
+  record "FAIL" "native runtime" "conda unavailable; cannot check ${sim_env}"
 fi
 
 if [[ -n "${summary_path}" ]]; then

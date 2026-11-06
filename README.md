@@ -51,6 +51,34 @@ The [RoboDojo documentation](https://robodojo-benchmark.com/doc/) is the canonic
 | [Configurations](https://robodojo-benchmark.com/doc/usage/configurations/) | Simulator, scene, robot, and camera configuration options. |
 | [Common Issues](https://robodojo-benchmark.com/doc/common-issue/) | Troubleshooting for installation, assets, GPU memory, and evaluation. |
 
+## Native Isaac Sim 6.2 migration
+
+This branch targets Python 3.12, Isaac Sim 6.2.0.0 and official Isaac Lab
+v3.0.0 with Isaac Sim PhysX and Isaac RTX. The source submodules are fixed by
+Git commits. Lab's upstream `uv.lock` owns Torch 2.11 (CUDA 13.0), Warp 1.17
+and NumPy 2.x. One compatibility exception keeps NumPy `>=2,<2.5`: Lab's lock
+contains NumPy 2.5.1 with Numba 0.64, whose import guard requires NumPy below
+2.5. Other runtime versions follow the upstream lock.
+
+```bash
+# Requires conda on PATH; installs the simulator env, not policy server envs.
+bash scripts/install.sh --install
+bash scripts/robodojo.sh doctor --skip-policy
+```
+
+Existing Python 3.11 environments fail the installer guard. Use a separate
+Python 3.12 environment (`export ROBODOJO_SIM_ENV=<name>`) when keeping an older
+installation. Resume with `bash scripts/install.sh --from isaaclab`; set
+`ROBODOJO_SIM_ENV` when using a nondefault environment. Sim and Lab install together from the
+upstream lock; `--from isaacsim` is an alias. See [scripts](scripts/README.md).
+
+The dependency migration is the first stage: the complete RoboDojo task runtime
+is still being ported. A passing doctor checks versions, source paths and
+imports; it does not certify simulation behavior, CUDA kernels or benchmark
+results. No fresh environment install or Docker build has been validated for
+this branch. The existing [Docker recipe](docker/README.md) still targets Sim
+5.1 and awaits a separate migration. Policy servers retain independent environments.
+
 ## 🗂️ Repository Structure
 
 ```text
@@ -120,8 +148,8 @@ Released under the [MIT License](LICENSE).
 
 
 <p align="center">
-  <img alt="Python 3.11" src="https://img.shields.io/badge/Python-3.11-475569?style=flat-square&logo=python&logoColor=white&labelColor=64748b" height="22"/>&nbsp;
-  <img alt="Isaac Sim 5.1" src="https://img.shields.io/badge/Isaac_Sim-5.1-475569?style=flat-square&logo=nvidia&logoColor=76B900&labelColor=64748b" height="22"/>&nbsp;
-  <img alt="Isaac Lab 2.3" src="https://img.shields.io/badge/Isaac_Lab-2.3-475569?style=flat-square&logo=nvidia&logoColor=76B900&labelColor=64748b" height="22"/>&nbsp;
+  <img alt="Python 3.12" src="https://img.shields.io/badge/Python-3.12-475569?style=flat-square&logo=python&logoColor=white&labelColor=64748b" height="22"/>&nbsp;
+  <img alt="Isaac Sim 6.2" src="https://img.shields.io/badge/Isaac_Sim-6.2-475569?style=flat-square&logo=nvidia&logoColor=76B900&labelColor=64748b" height="22"/>&nbsp;
+  <img alt="Isaac Lab 3.0" src="https://img.shields.io/badge/Isaac_Lab-3.0-475569?style=flat-square&logo=nvidia&logoColor=76B900&labelColor=64748b" height="22"/>&nbsp;
   <img alt="License MIT" src="https://img.shields.io/badge/License-MIT-475569?style=flat-square&labelColor=64748b" height="22"/>
 </p>

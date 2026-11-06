@@ -9,6 +9,33 @@
 | [init_assets.sh](init_assets.sh) | Download robot/object assets |
 | [eval_policy.sh](eval_policy.sh) | Isaac Sim eval client (called by `robodojo.sh client` and XPolicyLab) |
 
+## Simulator installation
+
+`bash scripts/install.sh --install` requires conda on PATH and creates or
+activates `RoboDojo` with Python 3.12. Export `ROBODOJO_SIM_ENV` to use another
+simulator environment for both installer and doctor. An existing Python 3.11 env is rejected before Python
+package installation. Policy server environments are managed separately by XPolicyLab.
+
+The ordered steps are `system`, `conda`, `submodules`, `isaaclab`, `base_deps`,
+`curobo`. Resume with `--from STEP`; `isaacsim` aliases `isaaclab` because
+upstream's locked install resolves Sim and Lab together. Submodule updates
+honor the recorded Git commits. Lab's official `uv.lock` and overrides own
+runtime versions, including Torch cu130 and Warp. The sole compatibility
+exception is NumPy `>=2,<2.5`: upstream's NumPy 2.5.1 conflicts with its locked
+Numba 0.64 import guard. The Lab step skips that NumPy lock entry and immediately
+installs NumPy within the supported range. Additional RoboDojo and cuRobo
+dependencies resolve against that lock with the same NumPy bound. Optional Lab
+extras are not selected beyond `isaacsim`; the upstream base still includes its
+own packages.
+
+`bash scripts/robodojo.sh doctor --skip-policy` checks source commit identity,
+editable paths, versions, loaded Torch/NumPy and planner imports. Numba
+imports check NumPy compatibility. The inspected Sim kernel/urllib3 and Sim core/fsspec
+overrides are reported individually as warnings; other dependency
+conflicts fail. `--skip-isaac` skips these runtime checks and cannot certify the
+runtime. The doctor does not launch Kit or execute GPU kernels. End-to-end
+RoboDojo runtime migration and a fresh install remain unvalidated at this stage.
+
 ## Typical eval flow
 
 ```text
